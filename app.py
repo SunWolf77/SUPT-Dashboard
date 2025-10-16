@@ -68,7 +68,7 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
 
 @st.cache_data(ttl=900)
 def fetch_noaa_kp():
-    """Fetch latest geomagnetic Kp index from NOAA SWPC with auto detection."""
+    """Fetch latest geomagnetic Kp index from NOAA SWPC with robust filtering."""
     try:
         url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
         r = requests.get(url, timeout=15)
@@ -76,14 +76,26 @@ def fetch_noaa_kp():
         df = pd.DataFrame(data[1:], columns=data[0])
         df.columns = [c.lower().strip() for c in df.columns]
         df["time_tag"] = pd.to_datetime(df.get("time_tag", pd.NaT), utc=True, errors="coerce")
+
+        # find the best column for Kp values
         kp_col = next((c for c in df.columns if "kp" in c and "index" in c), None)
         if kp_col is None:
             kp_col = [c for c in df.columns if df[c].apply(lambda x: str(x).replace('.', '', 1).isdigit()).any()][-1]
+
         df["kp_index"] = pd.to_numeric(df[kp_col], errors="coerce")
-        return df.tail(8)
+
+        # filter out nulls and out-of-range artifacts
+        df = df[(df["kp_index"].notna()) & (df["kp_index"].between(0, 9))]
+
+        # average last 2 valid entries to smooth partial feed spikes
+        valid = df["kp_index"].tail(2)
+        mean_kp = valid.mean() if not valid.empty else 1.0
+
+        return pd.DataFrame({"time_tag": [df["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
     except Exception as e:
         st.warning(f"⚠️ NOAA Kp fetch failed: {e}")
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
+
 
 # --------------------------------------------
 # SUPT COMPUTATION CORE
