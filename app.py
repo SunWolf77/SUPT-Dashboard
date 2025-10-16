@@ -1,6 +1,8 @@
-# SunWolf-SUPT: Solar Gold Forecast Dashboard (NumPy Smoothing Edition)
-# Live NOAA Solar Wind + INGV Seismic + SUPT Predictive Metrics
-# by SUPT / SunWolf Initiative, 2025
+# ==========================================================
+# ☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard
+# Real-time coupling between Solar & Geothermal Systems
+# by SUPT / SunWolf Initiative 2025
+# ==========================================================
 
 import streamlit as st
 import pandas as pd
@@ -9,9 +11,45 @@ import requests
 import plotly.graph_objs as go
 from datetime import datetime, timezone
 
-st.set_page_config(page_title="SunWolf-SUPT: Solar Gold Forecast Dashboard", layout="wide")
+# ----------------------------------------------------------
+# Page Configuration
+# ----------------------------------------------------------
+st.set_page_config(
+    page_title="SunWolf-SUPT: Solar Gold Forecast Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# 🌞 Title
+# ----------------------------------------------------------
+# Live Clock & Styling
+# ----------------------------------------------------------
+def live_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+def clock_pulse_html():
+    return """
+    <style>
+    @keyframes pulse {
+      0% {opacity: 0.3;}
+      50% {opacity: 1;}
+      100% {opacity: 0.3;}
+    }
+    .pulse-dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background-color: #fdd835;
+      animation: pulse 2s infinite;
+      margin-right: 6px;
+    }
+    </style>
+    <div class='pulse-dot'></div>
+    """
+
+# ----------------------------------------------------------
+# Title Header
+# ----------------------------------------------------------
 st.markdown(
     """
     <h1 style='text-align:center; color:#ffb300;'>☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard ☀️</h1>
@@ -20,17 +58,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 🕒 Live UTC Clock
-def live_utc():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
 col1, col2, col3 = st.columns([2, 3, 1])
 with col3:
-    st.metric(label="🕒 UTC", value=live_utc())
+    st.markdown(clock_pulse_html() + f"<b>🕒 {live_utc()}</b>", unsafe_allow_html=True)
 
-# ==============================
-# 🔹 LIVE DATA FETCH FUNCTIONS
-# ==============================
+# ----------------------------------------------------------
+# Data Fetching Functions (Cached)
+# ----------------------------------------------------------
 @st.cache_data(ttl=900)
 def fetch_kp_index():
     try:
@@ -63,16 +97,16 @@ def fetch_ingv():
     except Exception:
         return pd.DataFrame(columns=["time", "md", "depth"])
 
-# Load feeds
+# Load all feeds
 kp_df = fetch_kp_index()
 sw_df = fetch_solar_wind()
 eq_df = fetch_ingv()
 
 st.write(f"**Data Feeds:** NOAA 🟢 | INGV 🟢 | USGS 🟢 | Last Update: {live_utc()}")
 
-# ==============================
-# 🔸 SUPT METRICS ENGINE
-# ==============================
+# ----------------------------------------------------------
+# SUPT Metric Computation
+# ----------------------------------------------------------
 def compute_metrics(kp_df, sw_df, eq_df):
     kp = kp_df["kp_index"].astype(float).mean() if not kp_df.empty else 0
     sw_speed = sw_df["speed"].mean() if not sw_df.empty else 0
@@ -89,18 +123,18 @@ def compute_metrics(kp_df, sw_df, eq_df):
 
 psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density = compute_metrics(kp_df, sw_df, eq_df)
 
-# ==============================
-# 🌋 METRICS DISPLAY
-# ==============================
+# ----------------------------------------------------------
+# Display Metrics
+# ----------------------------------------------------------
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("EII", f"{eii:.3f}")
 col2.metric("ψₛ (Solar Coupling)", f"{psi_s:.3f}")
 col3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
 col4.metric("RPAM Status", rpam_status)
 
-# ==============================
-# ☀️ SOLAR WIND DUAL GAUGE
-# ==============================
+# ----------------------------------------------------------
+# Solar Gauges
+# ----------------------------------------------------------
 gauge_col1, gauge_col2 = st.columns(2)
 
 with gauge_col1:
@@ -131,11 +165,10 @@ with gauge_col2:
     ))
     st.plotly_chart(fig2, use_container_width=True)
 
-# ==============================
-# 🔄 COUPLING CHART (NumPy Smooth)
-# ==============================
+# ----------------------------------------------------------
+# Solar-Geophysical Coupling Chart
+# ----------------------------------------------------------
 st.subheader("Solar-Geophysical Coupling (24h Harmonic Trend)")
-
 if not kp_df.empty:
     times = pd.to_datetime(kp_df["time"])
     y = kp_df["kp_index"].astype(float).values
@@ -151,24 +184,52 @@ if not kp_df.empty:
         line=dict(color="#F57C00", width=3),
         name="Kp Index (Smoothed)"
     ))
-    fig3.update_layout(
-        title="Geomagnetic Activity (Kp)",
-        xaxis_title="Time (UTC)",
-        yaxis_title="Kp Index",
-        template="plotly_white"
-    )
+    fig3.update_layout(title="Geomagnetic Activity (Kp)", xaxis_title="Time (UTC)", yaxis_title="Kp Index", template="plotly_white")
     st.plotly_chart(fig3, use_container_width=True)
-else:
-    st.warning("No Kp data available.")
 
-# ==============================
-# 🪶 FOOTER
-# ==============================
+# ----------------------------------------------------------
+# SUPT 24h Harmonic Phase Memory
+# ----------------------------------------------------------
+st.subheader("SUPT 24h Harmonic Phase Memory (ψₛ, EII, αᵣ Drift)")
+
+try:
+    if not kp_df.empty and not sw_df.empty:
+        kp_df["time"] = pd.to_datetime(kp_df["time"], errors="coerce")
+        sw_df["time_tag"] = pd.to_datetime(sw_df["time_tag"], errors="coerce")
+        merged = pd.merge_asof(kp_df.sort_values("time"), sw_df.sort_values("time_tag"), left_on="time", right_on="time_tag", direction="nearest")
+        merged["psi_s"] = np.minimum(1, (merged["kp_index"].astype(float)/9 + merged["speed"]/700) / 2)
+        merged["eii"] = np.minimum(1, merged["psi_s"]*0.6 + (merged["speed"]/700)*0.4)
+        merged["alpha_r"] = 1 - merged["psi_s"]*0.8
+
+        x = np.arange(len(merged))
+        xnew = np.linspace(0, len(x) - 1, 200)
+        psi_s_smooth = np.interp(xnew, x, merged["psi_s"])
+        eii_smooth = np.interp(xnew, x, merged["eii"])
+        alpha_s_smooth = np.interp(xnew, x, merged["alpha_r"])
+
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter3d(
+            x=psi_s_smooth, y=eii_smooth, z=alpha_s_smooth,
+            mode='lines', line=dict(color="#FFD54F", width=5),
+            name='Phase Trajectory (24h)'
+        ))
+        fig4.update_layout(
+            scene=dict(xaxis_title="ψₛ", yaxis_title="EII", zaxis_title="αᵣ", bgcolor="black"),
+            template="plotly_dark", title="SUPT Harmonic Drift — ψₛ ↔ EII ↔ αᵣ (24h Memory)"
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+    else:
+        st.warning("Insufficient data for harmonic phase reconstruction.")
+except Exception as e:
+    st.error(f"Harmonic Phase Memory Error: {e}")
+
+# ----------------------------------------------------------
+# Footer
+# ----------------------------------------------------------
 st.markdown(
     f"""
-    <hr>
-    <p style='text-align:center; color:#FBC02D;'>
-    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2 (NumPy)
+    <hr><p style='text-align:center; color:#FBC02D;'>
+    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2.1
     </p>
     """,
     unsafe_allow_html=True,
