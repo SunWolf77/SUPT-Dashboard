@@ -4,14 +4,12 @@ import numpy as np
 import requests
 import io
 import plotly.graph_objects as go
-import time
 
 # --------------------------------------------
 # PAGE CONFIG
 # --------------------------------------------
 st.set_page_config(page_title="SunWolf-SUPT :: Global Forecast Dashboard", layout="wide")
 st.title("🌞🐺 SunWolf-SUPT :: Global Live Forecast Dashboard")
-st.caption("Powered by SUPT ψ-Fold • NOAA • INGV | Real-Time Data Fusion | Data Integrity Status: " + integrity_state)
 
 # --------------------------------------------
 # SIDEBAR CONTROLS
@@ -70,28 +68,20 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
 def fetch_noaa_kp():
     """Fetch the latest observed geomagnetic Kp index from NOAA with robust smoothing and fallback."""
     try:
-        # Primary live observed feed (1-minute resolution)
         url_obs = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
         r_obs = requests.get(url_obs, timeout=15)
         data_obs = pd.DataFrame(r_obs.json())
-
-        # Normalize and clean
         data_obs["time_tag"] = pd.to_datetime(data_obs["time_tag"], utc=True, errors="coerce")
         data_obs["kp_index"] = pd.to_numeric(data_obs["kp_index"], errors="coerce")
         data_obs = data_obs[(data_obs["kp_index"].notna()) & (data_obs["kp_index"].between(0, 9))]
 
-        # If valid data exist, compute smoothed mean of last readings
         if not data_obs.empty:
             valid = data_obs.tail(5)
             mean_kp = round(float(valid["kp_index"].mean()), 2)
-            if mean_kp <= 0:  # prevent zero anomaly
+            if mean_kp <= 0:
                 mean_kp = 1.0
-            return pd.DataFrame({
-                "time_tag": [valid["time_tag"].iloc[-1]],
-                "kp_index": [mean_kp]
-            })
+            return pd.DataFrame({"time_tag": [valid["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
 
-        # Secondary fallback (forecast)
         url_fore = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
         r_fore = requests.get(url_fore, timeout=15)
         data_fore = r_fore.json()
@@ -105,14 +95,17 @@ def fetch_noaa_kp():
         if mean_kp_fore <= 0:
             mean_kp_fore = 1.0
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [mean_kp_fore]})
-
-    except Exception as e:
-        st.warning(f"⚠️ NOAA Kp fetch failed: {e}")
+    except Exception:
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
 
-# Determine data integrity state
-if "kp_index" in kp_df.columns:
-    if kp_df["kp_index"].iloc[0] > 0:
+# --------------------------------------------
+# INTEGRITY INDICATOR LOGIC
+# --------------------------------------------
+kp_df = fetch_noaa_kp()
+
+if "kp_index" in kp_df.columns and not kp_df.empty:
+    kp_value = float(kp_df["kp_index"].iloc[0])
+    if kp_value > 0:
         integrity_state = "🟢 Live NOAA Feed"
         integrity_color = "#00cc66"
     else:
@@ -122,13 +115,12 @@ else:
     integrity_state = "🔴 Offline"
     integrity_color = "#cc0000"
 
-# Display top-right badge
 st.markdown(
     f"""
-    <div style="position:absolute; top:15px; right:25px; 
-                background-color:{integrity_color}; 
-                color:white; padding:6px 12px; 
-                border-radius:10px; font-size:16px; 
+    <div style="position:absolute; top:15px; right:25px;
+                background-color:{integrity_color};
+                color:white; padding:6px 12px;
+                border-radius:10px; font-size:16px;
                 font-weight:bold; box-shadow:0px 0px 6px #999;">
         {integrity_state}
     </div>
@@ -136,15 +128,14 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+st.caption(f"Powered by SUPT ψ-Fold • NOAA • INGV | Real-Time Data Fusion | Data Integrity Status: {integrity_state}")
 
 # --------------------------------------------
-# SUPT COMPUTATION CORE
+# SUPT COMPUTATION
 # --------------------------------------------
 def compute_supt(df, kp_df):
-    """Compute EII, ψₛ and RPAM."""
     if df.empty:
         return 0.0, "NORMAL", 1.0, float(kp_df["kp_index"].iloc[-1])
-
     mean_depth = df["depth"].mean()
     shallow_ratio = len(df[df["depth"] < 3]) / max(len(df), 1)
     kp = float(kp_df["kp_index"].iloc[-1])
@@ -154,25 +145,17 @@ def compute_supt(df, kp_df):
     return eii, rpam, psi_s, kp
 
 # --------------------------------------------
-# MAIN VISUAL BUILDER
+# BUILD & RENDER
 # --------------------------------------------
 def build_dashboard(latmin, latmax, lonmin, lonmax):
     df = fetch_ingv(latmin, latmax, lonmin, lonmax)
-    kp_df = fetch_noaa_kp()
     eii, rpam, psi_s, kp = compute_supt(df, kp_df)
 
     fig = go.Figure()
     fig.update_layout(
-        title=f"🌋 SunWolf-SUPT Phase Tracking — {region_name}<br>"
-              f"EII={eii:.3f} | RPAM={rpam} | ψₛ={psi_s:.3f} | Kp={kp:.1f}",
-        template="plotly_dark",
-        height=700,
-        scene=dict(
-            xaxis_title="Longitude",
-            yaxis_title="Latitude",
-            zaxis_title="Depth (km, inverted)",
-            zaxis=dict(range=[-10, 0])
-        )
+        title=f"🌋 SunWolf-SUPT Phase Tracking — {region_name}<br>EII={eii:.3f} | RPAM={rpam} | ψₛ={psi_s:.3f} | Kp={kp:.1f}",
+        template="plotly_dark", height=700,
+        scene=dict(xaxis_title="Longitude", yaxis_title="Latitude", zaxis_title="Depth (km, inverted)", zaxis=dict(range=[-10, 0]))
     )
 
     if not df.empty:
@@ -183,66 +166,7 @@ def build_dashboard(latmin, latmax, lonmin, lonmax):
             hovertext=[f"Md {m:.1f}<br>{t}" for m, t in zip(df["magnitude"], df["time"])]
         ))
 
-    # ψₛ Resonance Wave
-    t = np.linspace(0, 2*np.pi, 60)
-    amp = np.sin(t * psi_s * np.pi) * 0.5
-    z_wave = -3 + amp
-    x_wave = np.linspace(lonmin, lonmax, 60)
-    y_wave = np.linspace(latmin, latmax, 60)
-    fig.add_trace(go.Scatter3d(
-        x=x_wave, y=y_wave, z=z_wave,
-        mode="lines", line=dict(color="gold", width=6),
-        name="ψₛ Resonance"
-    ))
+    return fig
 
-    # Kp Gauge
-    fig.add_trace(go.Indicator(
-        mode="gauge+number",
-        value=kp,
-        title={"text": "Geomagnetic Kp Index"},
-        domain={"x": [0, 0.4], "y": [0, 0.25]},
-        gauge={
-            "axis": {"range": [0, 9]},
-            "bar": {"color": "gold"},
-            "steps": [
-                {"range": [0, 3], "color": "darkblue"},
-                {"range": [3, 6], "color": "orange"},
-                {"range": [6, 9], "color": "red"}
-            ]
-        }
-    ))
-
-    return fig, kp_df, df
-
-# --------------------------------------------
-# RENDER DASHBOARD
-# --------------------------------------------
-fig, kp_df, df = build_dashboard(latmin, latmax, lonmin, lonmax)
+fig = build_dashboard(latmin, latmax, lonmin, lonmax)
 st.plotly_chart(fig, use_container_width=True)
-
-# --------------------------------------------
-# DEPTH–Kp COUPLING
-# --------------------------------------------
-st.divider()
-st.subheader("🌐 Depth–Kp Coupling Monitor (Live)")
-
-if not df.empty:
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    hourly = df.groupby(pd.Grouper(key="time", freq="3H"))["depth"].mean().reset_index()
-else:
-    hourly = pd.DataFrame({
-        "time": pd.date_range(end=pd.Timestamp.utcnow(), periods=8, freq="3H"),
-        "depth": np.linspace(4.5, 2.5, 8)
-    })
-
-merged = pd.merge_asof(
-    hourly.sort_values("time"),
-    kp_df[["time_tag", "kp_index"]].rename(columns={"time_tag": "time"}),
-    on="time", tolerance=pd.Timedelta("3H"), direction="nearest"
-)
-
-merged.rename(columns={"depth": "Mean Depth (km)", "kp_index": "Kp Index"}, inplace=True)
-st.line_chart(merged.set_index("time"))
-st.caption("Live coupling between geomagnetic activity and mean seismic depth — updates every 3 hours.")
-
-st.success("✅ SunWolf-SUPT Global-Eye Live Dashboard Ready (ψₛ Resonance + Depth–Kp Coupling)")
