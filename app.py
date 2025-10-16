@@ -1,320 +1,128 @@
-# ==========================================================
-# 🌞🐺 SunWolf-SUPT v3.5 — Solar Gold + ψₛ Coupling + INGV Live
-# Real-time coupling between Solar and Geothermal Systems
-# Powered by SUPT ψ-Fold • NOAA • INGV • USGS
-# ==========================================================
+# SUPT :: Live Forecast Dashboard App (Streamlit)
+# Version: v2.1 Grok-ready with Live INGV & USGS Fetch
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import io
 import datetime as dt
-from datetime import datetime, timezone
-import plotly.graph_objs as go
+import matplotlib.pyplot as plt
+import io  # For parsing text responses
 
-# ==========================================================
-# Utility
-# ==========================================================
-def live_utc():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+# -------------------------- CONFIG -----------------------------
+API_TIMEOUT = 10  # seconds
+DEFAULT_SOLAR = {
+    "C_flare": 0.99,
+    "M_flare": 0.55,
+    "X_flare": 0.15,
+    "psi_s": 0.72,
+    "solar_speed": 688  # km/s
+}
+LOCAL_FALLBACK_CSV = "events_6.csv"  # Local CSV fallback path
 
-st.set_page_config(page_title="SunWolf-SUPT v3.5", layout="wide")
+# ----------------------- UTILITY FUNCTIONS ----------------------
 
-# ==========================================================
-# NOAA FEEDS
-# ==========================================================
-@st.cache_data(ttl=600)
-def fetch_kp_index():
+def compute_eii(md_max, md_mean, shallow_ratio, psi_s):
+    return np.clip((md_max * 0.2 + md_mean * 0.15 + shallow_ratio * 0.4 + psi_s * 0.25), 0, 1)
+
+def classify_phase(EII):
+    if EII >= 0.85:
+        return "ACTIVE - Collapse Window Initiated"
+    elif EII >= 0.6:
+        return "ELEVATED - Pressure Coupling Phase"
+    else:
+        return "MONITORING"
+
+# --------------------- LOAD SEISMIC DATA ------------------------
+@st.cache_data(show_spinner=False)
+def load_seismic_data():
     try:
-        url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-        data = requests.get(url, timeout=15).json()
-        header, rows = data[0], data[1:]
-        df = pd.DataFrame(rows, columns=header)
-        kp_col = [c for c in df.columns if "kp" in c.lower()][0]
-        time_col = [c for c in df.columns if "time" in c.lower()][0]
-        df["time"] = pd.to_datetime(df[time_col], errors="coerce")
-        df["kp_index"] = pd.to_numeric(df[kp_col], errors="coerce")
-        return df.dropna(subset=["kp_index"]).tail(24)
-    except Exception as e:
-        st.warning(f"NOAA Kp fetch failed: {e}")
-        return pd.DataFrame(columns=["time", "kp_index"])
-
-@st.cache_data(ttl=600)
-def fetch_solar_wind():
-    try:
-        url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-7-day.json"
-        data = requests.get(url, timeout=15).json()
-        df = pd.DataFrame(data[1:], columns=data[0])
-        df["density"] = pd.to_numeric(df["density"], errors="coerce")
-        df["speed"] = pd.to_numeric(df["speed"], errors="coerce")
-        df["time_tag"] = pd.to_datetime(df["time_tag"], errors="coerce")
-        return df.dropna(subset=["speed", "density"]).tail(96)
-    except Exception as e:
-        st.warning(f"Solar wind fetch failed: {e}")
-        return pd.DataFrame(columns=["time_tag", "density", "speed"])
-
-# ==========================================================
-# INGV LIVE FDSN — CAMPi FLEGREI
-# ==========================================================
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_ingv_quakes():
-    """
-    Robust real-time INGV FDSNWS query for Campi Flegrei (past 7 days).
-    Handles dynamic header variations in live 'text' feed.
-    """
-    import io
-    import datetime as dt
-
-    try:
+        # Live INGV FDSNWS query for last 7 days in Campi Flegrei box
         end_time = dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
         start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
-
-        url = (
-            f"https://webservices.ingv.it/fdsnws/event/1/query?"
-            f"starttime={start_time}&endtime={end_time}"
-            f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3"
-            f"&minmag=0.0&maxmag=5.0&format=text"
-        )
-
-        response = requests.get(url, timeout=20)
-        response.raise_for_status()
-        text_data = response.text.strip()
-
-        # Detect if the INGV response is empty or invalid
-        if not text_data or "No events were found" in text_data:
-            st.warning("⚠️ INGV returned empty response. Using fallback dataset.")
-            raise ValueError("Empty INGV response")
-
-        # Parse pipe-delimited format safely
-        df = pd.read_csv(io.StringIO(text_data), delimiter="|", comment="#")
-        df.columns = [c.strip() for c in df.columns]
-
-        # Dynamically detect time column
-        time_col_candidates = [c for c in df.columns if c.lower().startswith("time")]
-        if not time_col_candidates:
-            raise KeyError("No valid Time column in INGV feed")
-        time_col = time_col_candidates[0]
-
-        # Rename columns for consistency
-        df = df.rename(columns={
-            time_col: "Time",
-            "Latitude": "Lat",
-            "Longitude": "Lon",
-            "Depth(km)": "Depth/km",
-            "Magnitude": "Mag",
-            "Location": "Loc"
-        })
-
-        # Standardize and clean
-        df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-        if "Mag" not in df.columns and "Magnitude" in df.columns:
-            df["Mag"] = pd.to_numeric(df["Magnitude"], errors="coerce")
-        df["Depth/km"] = pd.to_numeric(df.get("Depth/km", np.nan), errors="coerce")
-
-        # Filter valid and recent quakes
-        df = df.dropna(subset=["Time", "Depth/km"])
-        df = df[df["Time"] > (dt.datetime.utcnow() - dt.timedelta(days=7))]
-
-        if df.empty:
-            raise ValueError("Parsed INGV DataFrame empty after cleaning")
-
-        return df.tail(200)
-
+        ingv_url = f"https://webservices.ingv.it/fdsnws/event/1/query?starttime={start_time}&endtime={end_time}&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3&format=text"
+        ingv_response = requests.get(ingv_url, timeout=API_TIMEOUT)
+        ingv_response.raise_for_status()
+        # Parse pipe-separated text from INGV
+        df_ingv = pd.read_csv(io.StringIO(ingv_response.text), delimiter="|")
+        df_ingv['time'] = pd.to_datetime(df_ingv['Time'])  # Convert 'Time' to datetime
+        df_ingv['magnitude'] = df_ingv['Magnitude']
+        df_ingv['depth_km'] = df_ingv['Depth/Km']
+        return df_ingv[df_ingv['time'] > dt.datetime.utcnow() - dt.timedelta(days=7)]  # Re-filter
     except Exception as e:
-        st.warning(f"INGV API fetch failed: {e}. Using fallback dataset.")
+        st.warning(f"INGV API fetch failed: {e}. Trying USGS fallback...")
+
         try:
-            seismic_path = "data/seismic_local.csv"
-            df = pd.read_csv(seismic_path)
-            df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-            df["Mag"] = pd.to_numeric(df.get("MD", df.get("Magnitude", 0.8)), errors="coerce")
-            df["Depth/km"] = pd.to_numeric(df.get("Depth", 1.8), errors="coerce")
-            return df[df["Time"] > (dt.datetime.utcnow() - dt.timedelta(days=7))]
-        except Exception:
-            # Final synthetic fallback
-            return pd.DataFrame({
-                "Time": [dt.datetime.utcnow()],
-                "Mag": [0.9],
-                "Depth/km": [1.8],
-                "Loc": ["Synthetic Event"]
-            })
+            # USGS FDSNWS fallback query for last 7 days in Campi Flegrei box (format=csv)
+            usgs_url = f"https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&starttime={start_time}&endtime={end_time}&minlatitude=40.7&maxlatitude=40.9&minlongitude=14.0&maxlongitude=14.3"
+            usgs_response = requests.get(usgs_url, timeout=API_TIMEOUT)
+            usgs_response.raise_for_status()
+            df_usgs = pd.read_csv(io.StringIO(usgs_response.text))
+            df_usgs['time'] = pd.to_datetime(df_usgs['time'])  # Convert 'time' to datetime
+            df_usgs['magnitude'] = df_usgs['mag']
+            df_usgs['depth_km'] = df_usgs['depth']
+            return df_usgs[df_usgs['time'] > dt.datetime.utcnow() - dt.timedelta(days=7)]  # Re-filter
+        except Exception as e:
+            st.warning(f"USGS API fetch failed: {e}. Using local CSV fallback.")
+            # Fallback to local CSV
+            df_local = pd.read_csv(LOCAL_FALLBACK_CSV)
+            df_local['time'] = pd.to_datetime(df_local['Time'])  # Adjust for local CSV format
+            df_local['magnitude'] = df_local['MD']
+            df_local['depth_km'] = df_local['Depth']
+            return df_local[df_local['time'] > dt.datetime.utcnow() - dt.timedelta(days=7)]
 
-# ==========================================================
-# ETNA COMPARATIVE OVERLAY
-# ==========================================================
-@st.cache_data(ttl=900)
-def fetch_etna_quakes():
-    try:
-        url = (
-            "https://webservices.ingv.it/fdsnws/event/1/query?"
-            "catalog=Etna&starttime=2025-09-01T00:00:00Z&endtime=now&format=csv"
-        )
-        df = pd.read_csv(url)
-        df = df.rename(columns={"time": "Time", "depth": "Depth/km"})
-        df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-        df["Depth/km"] = pd.to_numeric(df["Depth/km"], errors="coerce")
-        return df.dropna(subset=["Depth/km"]).tail(200)
-    except Exception:
-        return pd.DataFrame(columns=["Time", "Depth/km"])
+# -------------------- MAIN DASHBOARD LOGIC ---------------------
+st.set_page_config(layout="centered", page_title="SUPT :: GROK Forecast")
+st.title("SUPT :: GROK Forecast Dashboard")
+st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v2.1")
 
-# ==========================================================
-# USGS (Fallback)
-# ==========================================================
-@st.cache_data(ttl=600)
-def fetch_usgs_quakes():
-    try:
-        df = pd.read_csv("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.csv")
-        df = df.rename(columns={"time": "Time", "mag": "Mag", "depth": "Depth/km", "place": "Loc"})
-        df["Time"] = pd.to_datetime(df["Time"])
-        return df
-    except Exception:
-        return pd.DataFrame(columns=["Time", "Mag", "Depth/km", "Loc"])
+with st.spinner("Loading seismic data..."):
+    df = load_seismic_data()
 
-# ==========================================================
-# Fallback Helper
-# ==========================================================
-def ensure_fallback(df, label):
-    if df.empty:
-        st.warning(f"⚠️ {label} feed unavailable — using synthetic sample.")
-        if label == "NOAA":
-            return pd.DataFrame({"time": [datetime.utcnow()], "kp_index": [1.0]})
-        if label == "Solar Wind":
-            return pd.DataFrame({"time_tag": [datetime.utcnow()], "density": [3.5], "speed": [430]})
-        if label == "INGV":
-            return pd.DataFrame({"Time": [datetime.utcnow()], "Mag": [0.8], "Depth/km": [1.7]})
-    return df
+if df.empty:
+    st.error("No seismic data loaded. Check API or local source.")
+    st.stop()
 
-# ==========================================================
-# Fetch all live feeds
-# ==========================================================
-kp_df = ensure_fallback(fetch_kp_index(), "NOAA Kp")
-sw_df = ensure_fallback(fetch_solar_wind(), "Solar Wind")
-eq_df = ensure_fallback(fetch_ingv_quakes(), "INGV")
-etna_df = fetch_etna_quakes()
+# METRIC CALCS
+md_max = df['magnitude'].max()
+md_mean = df['magnitude'].mean()
+depth_mean = df['depth_km'].mean()
+shallow_ratio = len(df[df['depth_km'] < 2.5]) / len(df) if len(df) > 0 else 0
 
-feeds_status = (
-    "🟢 NOAA | 🟢 INGV | 🟢 USGS"
-    if not sw_df.empty else "⚠️ Partial feeds (fallback active)"
-)
+# SOLAR INPUT (Manual override or live input)
+st.sidebar.header("Solar Activity Input")
+psi_s = st.sidebar.slider("Solar Pressure Proxy (ψₛ)", 0.0, 1.0, DEFAULT_SOLAR["psi_s"])
+solar_speed = st.sidebar.number_input("Solar Wind Speed (km/s)", value=DEFAULT_SOLAR["solar_speed"])
+C_prob = st.sidebar.slider("C-Flare Probability", 0.0, 1.0, DEFAULT_SOLAR["C_flare"])
+M_prob = st.sidebar.slider("M-Flare Probability", 0.0, 1.0, DEFAULT_SOLAR["M_flare"])
+X_prob = st.sidebar.slider("X-Flare Probability", 0.0, 1.0, DEFAULT_SOLAR["X_flare"])
 
-# ==========================================================
-# Compute SUPT Metrics
-# ==========================================================
-def compute_supt_metrics(kp_df, sw_df, eq_df):
-    if sw_df.empty or kp_df.empty:
-        return 0, 0, 0, "NO DATA", 0, 0, "#EF9A9A"
-    kp = kp_df["kp_index"].mean()
-    sw_speed = sw_df["speed"].mean()
-    sw_density = sw_df["density"].mean()
-    eq_mag = eq_df["Mag"].mean() if not eq_df.empty else 0.0
-    psi_s = min(1, (kp / 9 + sw_speed / 700) / 2)
-    eii = min(1, (psi_s * 0.6 + (eq_mag / 5) * 0.4))
-    alpha_r = 1 - psi_s * 0.8
-    if eii <= 0.35:
-        rpam, color = "STABLE", "#4FC3F7"
-    elif eii <= 0.65:
-        rpam, color = "TRANSITIONAL", "#FFB300"
-    else:
-        rpam, color = "CRITICAL", "#E53935"
-    return psi_s, eii, alpha_r, rpam, sw_speed, sw_density, color
+# COMPUTE
+EII = compute_eii(md_max, md_mean, shallow_ratio, psi_s)
+RPAM_STATUS = classify_phase(EII)
+COLLAPSE_WINDOW = "Q1 2026" if RPAM_STATUS == "ACTIVE - Collapse Window Initiated" else "N/A"
 
-psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density, color = compute_supt_metrics(
-    kp_df, sw_df, eq_df
-)
+# DISPLAY
+st.metric("Energetic Instability Index (EII)", f"{EII:.3f}")
+st.metric("RPAM Status", RPAM_STATUS)
+st.metric("Collapse Window", COLLAPSE_WINDOW)
 
-# ==========================================================
-# HEADER
-# ==========================================================
-st.markdown(
-    f"<h1 style='text-align:center; color:#FFA000;'>🌞🐺 SunWolf-SUPT: Solar Gold Forecast Dashboard</h1>"
-    f"<p style='text-align:center; color:#FBC02D;'>Real-time coupling between Solar & Geothermal Systems — SUPT ψ-Fold Engine</p>"
-    f"<p style='text-align:right; color:gray;'>🕒 Updated: {live_utc()}</p>",
-    unsafe_allow_html=True,
-)
-st.markdown(f"<b>Data Feeds:</b> {feeds_status}", unsafe_allow_html=True)
+st.subheader("Seismic Snapshot (past 7 days)")
+st.write(df[['time', 'magnitude', 'depth_km']].tail(15))
 
-# ==========================================================
-# Dashboard Metrics
-# ==========================================================
-st.markdown(
-    f"<div style='background-color:{color}; padding:10px; border-radius:8px; text-align:center; color:white;'>"
-    f"<b>RPAM: {rpam_status}</b></div>",
-    unsafe_allow_html=True,
-)
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("EII", f"{eii:.3f}")
-c2.metric("ψₛ (Solar Coupling)", f"{psi_s:.3f}")
-c3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
-c4.metric("Phase", rpam_status)
+# PLOT
+fig, ax = plt.subplots()
+ax.hist(df['depth_km'], bins=15, color='orange', edgecolor='black')
+ax.set_xlabel("Depth (km)")
+ax.set_ylabel("Quake Count")
+ax.set_title("Depth Distribution")
+st.pyplot(fig)
 
-# ==========================================================
-# Gauges
-# ==========================================================
-g1, g2 = st.columns(2)
-with g1:
-    st.subheader("☀️ Solar Wind Speed (km/s)")
-    fig1 = go.Figure(go.Indicator(
-        mode="gauge+number", value=sw_speed,
-        gauge={"axis": {"range": [250, 800]},
-               "bar": {"color": color},
-               "steps": [{"range": [250, 500], "color": "#FFF8E1"},
-                         {"range": [500, 650], "color": "#FFD54F"},
-                         {"range": [650, 800], "color": "#F4511E"}]},
-        title={"text": "Plasma Velocity"}))
-    st.plotly_chart(fig1, use_container_width=True)
+# Solar status box
+st.subheader("Current Solar Conditions")
+st.write(f"**Solar Wind Speed**: {solar_speed} km/s")
+st.write(f"**Flare Probabilities**: C: {C_prob}, M: {M_prob}, X: {X_prob}")
 
-with g2:
-    st.subheader("🌫 Solar Wind Density (p/cm³)")
-    fig2 = go.Figure(go.Indicator(
-        mode="gauge+number", value=sw_density,
-        gauge={"axis": {"range": [0, 20]},
-               "bar": {"color": color},
-               "steps": [{"range": [0, 5], "color": "#FFF8E1"},
-                         {"range": [5, 10], "color": "#FFD54F"},
-                         {"range": [10, 20], "color": "#F4511E"}]},
-        title={"text": "Plasma Density"}))
-    st.plotly_chart(fig2, use_container_width=True)
-
-# ==========================================================
-# ψₛ Harmonic Coupling Curve
-# ==========================================================
-st.markdown("### ☯ SUPT ψₛ Coupling — 24 h Harmonic Drift")
-if not sw_df.empty:
-    psi_hist = ((sw_df["speed"] / 700) + (sw_df["density"] / 10)) / 2
-    fig_hist = go.Figure()
-    fig_hist.add_trace(go.Scatter(
-        x=sw_df["time_tag"], y=psi_hist, mode="lines",
-        line=dict(color="#FFB300", width=2.5), name="ψₛ Coupling Index"))
-    fig_hist.update_layout(
-        xaxis_title="UTC Time (last 24 h)", yaxis_title="ψₛ",
-        yaxis=dict(range=[0, 1]), template="plotly_white", height=300)
-    st.plotly_chart(fig_hist, use_container_width=True)
-else:
-    st.info("No solar wind history available yet — waiting for feed update.")
-
-# ==========================================================
-# Comparative Overlay — Etna vs Campi Flegrei
-# ==========================================================
-st.markdown("### 🌋 Regional Coupling Overlay — Etna vs Campi Flegrei")
-try:
-    if not etna_df.empty and not eq_df.empty:
-        fig_cmp = go.Figure()
-        fig_cmp.add_trace(go.Box(y=eq_df["Depth/km"], name="Campi Flegrei", marker_color="#FFB300"))
-        fig_cmp.add_trace(go.Box(y=etna_df["Depth/km"], name="Etna (Sicily)", marker_color="#81C784"))
-        fig_cmp.update_layout(
-            yaxis_title="Depth (km)",
-            title="Volcanic Depth Distribution vs ψₛ Coupling Phase",
-            template="plotly_white", height=300)
-        st.plotly_chart(fig_cmp, use_container_width=True)
-    else:
-        st.info("Regional overlay waiting for feed refresh.")
-except Exception:
-    st.info("Etna overlay unavailable — retry after feed refresh.")
-
-# ==========================================================
 # Footer
-# ==========================================================
-st.markdown(
-    f"<hr><p style='text-align:center; color:#FBC02D;'>Updated {live_utc()} | Feeds: {feeds_status} | Mode: Solar Gold ☀️ | SunWolf-SUPT v3.5</p>",
-    unsafe_allow_html=True,
-)
+st.caption("Powered by SUPT - Sheppard's Universal Proxy Theory")
+st.caption("Forecast parameters editable. Grok API-ready.")
