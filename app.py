@@ -59,6 +59,7 @@ def fetch_quakes():
     """Fetch Campi Flegrei quakes (INGV → USGS → local fallback). Always returns valid DataFrame."""
     start = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
     end = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+
     try:
         url = (
             f"https://webservices.ingv.it/fdsnws/event/1/query?"
@@ -67,74 +68,98 @@ def fetch_quakes():
         resp = requests.get(url, timeout=API_TIMEOUT)
         resp.raise_for_status()
         text = resp.text.strip()
-        if not text or "No events" in text:
-            raise ValueError("Empty INGV response")
 
-        # ensure a header line exists
+        if not text or "No events" in text:
+            raise ValueError("INGV returned empty or null response.")
+
+        # Ensure header exists
         lines = [l for l in text.splitlines() if l.strip()]
         if not lines[0].startswith("#"):
-            # add synthetic header if missing
-            header = "#EventID|Time|Latitude|Longitude|Depth(km)|Magnitude|Agency|Location"
-            lines.insert(0, header)
+            lines.insert(
+                0,
+                "#EventID|Time|Latitude|Longitude|Depth(km)|Magnitude|Author|EventLocationName",
+            )
         clean_text = "\n".join(lines)
 
-        df = pd.read_csv(io.StringIO(clean_text), delimiter="|", comment="#", engine="python", dtype=str)
+        # Parse
+        df = pd.read_csv(io.StringIO(clean_text), delimiter="|", comment="#", engine="python")
         df.columns = [c.strip() for c in df.columns]
 
-        # Flexible column resolution
-        time_col = next((c for c in df.columns if "time" in c.lower() or "origin" in c.lower()), None)
-        mag_col = next((c for c in df.columns if "mag" in c.lower()), None)
-        dep_col = next((c for c in df.columns if "depth" in c.lower()), None)
+        # Adaptive mapping for any column variant
+        col_map = {}
+        for c in df.columns:
+            cl = c.lower()
+            if "time" in cl or "origin" in cl or "date" in cl:
+                col_map[c] = "Time"
+            elif "depth" in cl or "km" in cl:
+                col_map[c] = "Depth(km)"
+            elif "mag" in cl or "magnitude" in cl:
+                col_map[c] = "Magnitude"
+        df = df.rename(columns=col_map)
 
-        if not (time_col and mag_col and dep_col):
-            # fallback header guess
-            cols = ["EventID", "Time", "Latitude", "Longitude", "Depth", "Magnitude", "Agency", "Location"]
-            df.columns = (df.columns.tolist() + cols)[: len(df.columns)]
-            time_col, mag_col, dep_col = "Time", "Magnitude", "Depth"
+        # Log what was detected
+        st.info(f"Detected INGV columns: {list(df.columns)}")
 
-        # Standardize
-        df["time"] = pd.to_datetime(df[time_col], errors="coerce")
-        df["magnitude"] = pd.to_numeric(df[mag_col], errors="coerce")
-        df["depth_km"] = pd.to_numeric(df[dep_col], errors="coerce")
+        if not all(x in df.columns for x in ["Time", "Depth(km)", "Magnitude"]):
+            raise KeyError("Required fields missing after mapping.")
 
+        df["time"] = pd.to_datetime(df["Time"], errors="coerce")
+        df["magnitude"] = pd.to_numeric(df["Magnitude"], errors="coerce")
+        df["depth_km"] = pd.to_numeric(df["Depth(km)"], errors="coerce")
         df = df.dropna(subset=["time", "magnitude", "depth_km"])
         df = df[df["time"] > dt.datetime.utcnow() - dt.timedelta(days=7)]
+
         if df.empty:
-            raise ValueError("INGV returned zero usable rows.")
+            raise ValueError("INGV feed valid but returned 0 usable rows.")
+
         return df.reset_index(drop=True)
 
     except Exception as e:
         st.warning(f"INGV fetch failed: {e}. Trying USGS fallback...")
+
+        # === USGS Fallback ===
         try:
-            url = (
+            usgs_url = (
                 f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
                 f"format=csv&starttime={start}&endtime={end}"
                 f"&minlatitude=40.7&maxlatitude=40.9&minlongitude=14.0&maxlongitude=14.3"
             )
-            text = requests.get(url, timeout=API_TIMEOUT).text
-            df = pd.read_csv(io.StringIO(text))
+            df = pd.read_csv(io.StringIO(requests.get(usgs_url, timeout=API_TIMEOUT).text))
             df["time"] = pd.to_datetime(df["time"], errors="coerce")
             df["magnitude"] = pd.to_numeric(df["mag"], errors="coerce")
             df["depth_km"] = pd.to_numeric(df["depth"], errors="coerce")
-            return df.dropna(subset=["time", "magnitude", "depth_km"])
+            df = df.dropna(subset=["time", "magnitude", "depth_km"])
+            if not df.empty:
+                st.success(f"USGS fallback succeeded. {len(df)} quakes loaded.")
+                return df
+            raise ValueError("USGS fallback returned empty data.")
         except Exception as e2:
-            st.warning(f"USGS fallback failed: {e2}. Loading local fallback dataset.")
+            st.warning(f"USGS fallback failed: {e2}. Loading local/synthetic sample.")
+
+            # === Local or synthetic fallback ===
             try:
                 df = pd.read_csv(LOCAL_FALLBACK)
                 df["time"] = pd.to_datetime(df.get("Time", df.index), errors="coerce")
                 df["magnitude"] = pd.to_numeric(df.get("MD", 0.6), errors="coerce")
                 df["depth_km"] = pd.to_numeric(df.get("Depth", 1.9), errors="coerce")
-                return df.dropna(subset=["time", "magnitude", "depth_km"])
+                df = df.dropna(subset=["time", "magnitude", "depth_km"])
+                if len(df) > 0:
+                    st.info(f"Loaded {len(df)} local fallback quakes.")
+                    return df
             except Exception:
-                # absolute safety: synthetic data for continuity
-                now = dt.datetime.utcnow()
-                synth = pd.DataFrame({
+                pass
+
+            # === Synthetic data ===
+            now = dt.datetime.utcnow()
+            synth = pd.DataFrame(
+                {
                     "time": [now - dt.timedelta(hours=i) for i in range(12)],
-                    "magnitude": np.random.uniform(0.2, 1.1, 12),
-                    "depth_km": np.random.uniform(0.5, 3.2, 12)
-                })
-                st.warning("⚠️ Using synthetic seismic dataset.")
-                return synth
+                    "magnitude": np.random.uniform(0.2, 1.2, 12),
+                    "depth_km": np.random.uniform(0.5, 3.5, 12),
+                }
+            )
+            st.warning("⚠️ Using synthetic dataset for continuity.")
+            return synth
 
 # ---------------------------------------------------------------
 # SOLAR WIND (SYNTHETIC FOR ψₛ DRIFT)
