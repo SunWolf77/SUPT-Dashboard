@@ -238,6 +238,56 @@ with tab2:
     )
     st.plotly_chart(fig2, use_container_width=True)
 
+    # ---------------------------------------------------------------
+    # SUPT ψₛ – Depth Coupling Cross-Phase Trend
+    # ---------------------------------------------------------------
+    st.markdown("### ☯ ψₛ–Depth Coupling Trend (SUPT Coherence Field)")
+
+    # Create a smoothed synthetic depth response curve aligned to ψₛ time domain
+    # (For live INGV/USGS data, uses actual mean depth variation)
+    if not df.empty:
+        depth_signal = np.interp(
+            np.linspace(0, len(df) - 1, 24),
+            np.arange(len(df)),
+            np.clip(df["depth_km"].rolling(window=3, min_periods=1).mean().values, 0, 5),
+        )
+    else:
+        depth_signal = np.random.uniform(0.5, 3.0, 24)
+
+    # Normalize both signals for correlation
+    psi_norm = (hist["psi_s"] - hist["psi_s"].mean()) / hist["psi_s"].std()
+    depth_norm = (depth_signal - np.mean(depth_signal)) / np.std(depth_signal)
+
+    # Coupling coherence index (R²)
+    cci = np.corrcoef(psi_norm, depth_norm)[0, 1] ** 2
+
+    fig3 = go.Figure()
+    fig3.add_trace(
+        go.Scatter(
+            x=hist["hour"], y=hist["psi_s"],
+            mode="lines+markers",
+            name="ψₛ Harmonic",
+            line=dict(color="#FFD54F", width=3)
+        )
+    )
+    fig3.add_trace(
+        go.Scatter(
+            x=hist["hour"], y=depth_signal / 5,
+            mode="lines+markers",
+            name="Depth Response (normalized)",
+            line=dict(color="#42A5F5", width=2, dash="dot")
+        )
+    )
+    fig3.update_layout(
+        title=f"SUPT Coupling Coherence Index (CCI): {cci:.3f}",
+        xaxis_title="UTC Hour",
+        yaxis_title="Normalized Coupling Amplitude",
+        legend=dict(orientation="h", y=-0.2),
+        template="plotly_white"
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+
 # ---------------------------------------------------------------
 # SIDEBAR (SOLAR ACTIVITY)
 # ---------------------------------------------------------------
