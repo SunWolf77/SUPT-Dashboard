@@ -1,93 +1,84 @@
-import requests
+import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime, timezone
+import requests
+from datetime import datetime, timedelta
 
-NOAA_URL = "https://services.swpc.noaa.gov/json/solar-wind.json"
-USGS_URL = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson"
+# Existing code...
+# (Assuming you already have your NOAA Solar Wind + USGS functions defined above)
 
-def fetch_noaa():
+# === NEW: SUPT SunWolf Integration ===
+
+def fetch_ingv(latmin, latmax, lonmin, lonmax):
+    """Fetch recent Campi Flegrei / Vulcano events."""
+    url = (f"https://webservices.ingv.it/fdsnws/event/1/query?"
+           f"starttime={datetime.utcnow()-timedelta(days=7):%Y-%m-%d}&endtime=now"
+           f"&latmin={latmin}&latmax={latmax}&lonmin={lonmin}&lonmax={lonmax}&format=text")
     try:
-        r = requests.get(NOAA_URL, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        data = data[-10:]
-        times = [datetime.utcfromtimestamp(item["time_tag"]/1000).isoformat() for item in data]
-        values = [item.get("density", 0.1) for item in data]
-        return times, values
+        df = pd.read_csv(url, sep="|", comment="#")
+        df.columns = [c.strip().lower() for c in df.columns]
+        df = df.rename(columns={"mag":"md"}).dropna(subset=["depth", "md"])
+        return df
     except Exception as e:
-        print(f"[NOAA Fallback] {e}")
-        now = datetime.now(timezone.utc).isoformat()
-        return [now], [0.1]
+        print("INGV fetch failed:", e)
+        return pd.DataFrame(columns=["time","latitude","longitude","depth","md"])
 
-def fetch_usgs():
+def fetch_kp():
+    """Fetch current planetary K-index from NOAA SWPC."""
     try:
-        r = requests.get(USGS_URL, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        times, mags = [], []
-        for feat in data["features"][:10]:
-            ts = feat["properties"]["time"] / 1000.0
-            times.append(datetime.utcfromtimestamp(ts).isoformat())
-            mags.append(feat["properties"]["mag"] or 0)
-        return times, mags
-    except Exception as e:
-        print(f"[USGS Fallback] {e}")
-        now = datetime.now(timezone.utc).isoformat()
-        return [now], [0.0]
+        data = requests.get(
+            "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
+            timeout=5).json()
+        return float(data[-1][1])
+    except Exception:
+        return 3.0
+
+def compute_sunwolf(cf_df, vulc_df, kp):
+    """Compute SUPT–SunWolf EII and RPAM metrics."""
+    shallow = lambda df: (df["depth"] < 3).mean() if len(df) else 0
+    cf_sr, vulc_sr = shallow(cf_df), shallow(vulc_df)
+    eii = 0.5 * (cf_sr + vulc_sr) * (1 + min(kp/7, 0.25))
+    rpam = "ELEVATED" if eii > 0.55 else "NORMAL"
+    psi_s = round(1 + min(kp/28, 0.25), 3)
+    return eii, rpam, psi_s
 
 def build_dashboard():
-    noaa_times, noaa_vals = fetch_noaa()
-    usgs_times, usgs_mags = fetch_usgs()
+    """Extended dashboard integrating SUPT SunWolf model."""
+    # Fetch seismic + geomagnetic data
+    cf_df = fetch_ingv(40.79, 40.84, 14.10, 14.15)   # Campi Flegrei
+    vulc_df = fetch_ingv(38.38, 38.47, 14.90, 15.05) # Vulcano
+    kp = fetch_kp()
 
-    stress = [v - 1.0 for v in noaa_vals]  # simple proxy
+    eii, rpam, psi_s = compute_sunwolf(cf_df, vulc_df, kp)
 
+    # === PLOTLY DASHBOARD ===
     fig = go.Figure()
-
-    # NOAA ΔΦ Drift
-    fig.add_trace(go.Scatter(
-        x=noaa_times, y=noaa_vals,
-        mode="lines+markers",
-        name="ΔΦ Drift (NOAA)",
-        line=dict(color="orange")
-    ))
-
-    # Stress overlay
-    fig.add_trace(go.Scatter(
-        x=noaa_times, y=stress,
-        mode="lines",
-        name="Stress k(ΔΦ)",
-        line=dict(color="blue", dash="dot")
-    ))
-
-    # USGS earthquakes
-    fig.add_trace(go.Scatter(
-        x=usgs_times, y=usgs_mags,
-        mode="markers",
-        name="Earthquake Magnitude (USGS)",
-        marker=dict(color="red", size=10)
-    ))
-
-    # Threshold line
-    fig.add_hline(y=-1.0, line=dict(color="purple", dash="dash"),
-                  annotation_text="ZFCM Threshold (-1.0)")
-
-    # Check alert condition
-    if any(s < -1.0 for s in stress):
-        fig.add_annotation(
-            text="🚨 ALERT: Stress below ZFCM Threshold! 🚨",
-            xref="paper", yref="paper",
-            x=0.5, y=1.1, showarrow=False,
-            font=dict(color="red", size=16, family="Arial Black"),
-            bgcolor="yellow", bordercolor="red", borderwidth=2
-        )
-
-    # Layout
     fig.update_layout(
-        title=f"SUΨT Dashboard — Live NOAA + USGS @ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-        xaxis_title="Time (UTC)",
-        yaxis_title="Value",
-        template="plotly_white",
-        height=700
+        title=f"SunWolf-SUPT Phase Tracking — Campi Flegrei & Vulcano<br>EII={eii:.3f}, RPAM={rpam}, ψₛ={psi_s}",
+        template="plotly_dark",
+        height=600
     )
+
+    # Add quake scatter traces
+    for name, df, color in [
+        ("Campi Flegrei", cf_df, "orange"),
+        ("Vulcano", vulc_df, "lightblue")
+    ]:
+        if len(df):
+            fig.add_trace(go.Scatter3d(
+                x=df["longitude"], y=df["latitude"], z=-df["depth"],
+                mode="markers", name=name,
+                marker=dict(size=4, color=color, opacity=0.7),
+                hovertext=[f"{name}<br>Md {m:.1f}<br>{t}" for m, t in zip(df["md"], df["time"])]
+            ))
+
+    # Add solar coupling bar
+    fig.add_trace(go.Indicator(
+        mode="gauge+number",
+        value=kp,
+        title={"text": "Geomagnetic Kp Index"},
+        domain={"x": [0, 0.4], "y": [0, 0.25]},
+        gauge={"axis": {"range": [0, 9]},
+               "bar": {"color": "gold"}}
+    ))
 
     return fig
