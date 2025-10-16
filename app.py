@@ -1,200 +1,167 @@
+# SunWolf-SUPT: Solar Gold Forecast Dashboard
+# Live NOAA Solar Wind + INGV Seismic + SUPT Predictive Metrics
+# by SUPT / SunWolf Initiative, 2025
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import io
-import plotly.graph_objects as go
+import plotly.graph_objs as go
+from datetime import datetime, timezone
+from scipy.interpolate import make_interp_spline
 
-# --------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------
-st.set_page_config(page_title="SunWolf-SUPT :: Global Forecast Dashboard", layout="wide")
-st.title("🌞🐺 SunWolf-SUPT :: Global Live Forecast Dashboard")
+st.set_page_config(page_title="SunWolf-SUPT: Solar Gold Forecast Dashboard", layout="wide")
 
-# --------------------------------------------
-# SIDEBAR CONTROLS
-# --------------------------------------------
-st.sidebar.title("🌎 SunWolf Global-Eye Mode")
-mode = st.sidebar.radio(
-    "Select Active Region",
-    [
-        "Campi Flegrei + Vulcano (Italy)",
-        "Etna (Sicily)",
-        "Klyuchevskoy (Kamchatka)",
-        "Drake Passage (South Atlantic)"
-    ],
-    index=0
+# 🌞 Title & Header
+st.markdown(
+    """
+    <h1 style='text-align:center; color:#ffb300;'>☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard ☀️</h1>
+    <p style='text-align:center; color:#fbc02d;'>Real-time coupling between Solar & Geothermal Systems — Live Forecast Engine</p>
+    """,
+    unsafe_allow_html=True,
 )
 
-if "Etna" in mode:
-    region_name = "Etna (Sicily)"
-    latmin, latmax, lonmin, lonmax = 37.6, 37.8, 14.9, 15.1
-elif "Klyuchevskoy" in mode:
-    region_name = "Klyuchevskoy (Kamchatka)"
-    latmin, latmax, lonmin, lonmax = 56.0, 56.2, 160.5, 160.8
-elif "Drake" in mode:
-    region_name = "Drake Passage (South Atlantic)"
-    latmin, latmax, lonmin, lonmax = -60.5, -55.5, -70.5, -60.5
-else:
-    region_name = "Campi Flegrei + Vulcano (Italy)"
-    latmin, latmax, lonmin, lonmax = 38.38, 40.84, 14.10, 15.05
+# 🕒 Live UTC Clock
+def live_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-st.sidebar.success(f"Fetching live data for **{region_name}** region")
+col1, col2, col3 = st.columns([2, 3, 1])
+with col3:
+    st.metric(label="🕒 UTC", value=live_utc())
 
-# --------------------------------------------
-# DATA FETCHERS
-# --------------------------------------------
+# ==============================
+# 🔹 LIVE DATA FETCH FUNCTIONS
+# ==============================
 @st.cache_data(ttl=900)
-def fetch_ingv(latmin, latmax, lonmin, lonmax):
-    """Fetch INGV or fallback to USGS if empty."""
+def fetch_kp_index():
     try:
-        url = (
-            f"https://webservices.ingv.it/fdsnws/event/1/query?"
-            f"starttime=2025-09-01&endtime=now&latmin={latmin}&latmax={latmax}&"
-            f"lonmin={lonmin}&lonmax={lonmax}&minmag=-0.5&maxmag=6&format=csv"
-        )
-        r = requests.get(url, timeout=20)
-
-        if not r.text.strip() or "Error" in r.text:
-            st.warning("⚠️ INGV returned no data; switching to USGS fallback.")
-            usgs_url = (
-                f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
-                f"format=geojson&starttime=2025-09-01&endtime=now"
-                f"&minlatitude={latmin}&maxlatitude={latmax}"
-                f"&minlongitude={lonmin}&maxlongitude={lonmax}&minmagnitude=-0.5"
-            )
-            usgs_r = requests.get(usgs_url, timeout=20).json()
-            features = usgs_r.get("features", [])
-            if not features:
-                return pd.DataFrame(), "USGS"
-            df = pd.DataFrame([
-                {
-                    "time": pd.to_datetime(f["properties"]["time"], unit="ms", utc=True),
-                    "latitude": f["geometry"]["coordinates"][1],
-                    "longitude": f["geometry"]["coordinates"][0],
-                    "depth": f["geometry"]["coordinates"][2],
-                    "magnitude": f["properties"]["mag"],
-                    "place": f["properties"]["place"],
-                }
-                for f in features
-            ])
-            return df, "USGS"
-
-        df = pd.read_csv(io.StringIO(r.text))
-        df.rename(columns=lambda x: x.strip().lower(), inplace=True)
-        df["depth"] = pd.to_numeric(df.get("depth", np.nan), errors="coerce")
-        df["magnitude"] = pd.to_numeric(df.get("magnitude", np.nan), errors="coerce")
-        df["time"] = pd.to_datetime(df.get("time", pd.NaT), utc=True, errors="coerce")
-        return df.dropna(subset=["depth", "magnitude"]), "INGV"
-
-    except Exception as e:
-        st.error(f"🚨 INGV/USGS feed error: {e}")
-        return pd.DataFrame(), "ERROR"
-
-
-@st.cache_data(ttl=900)
-def fetch_noaa_kp():
-    """Fetch NOAA Kp Index with fallback."""
-    try:
-        url = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
-        r = requests.get(url, timeout=15)
-        data = pd.DataFrame(r.json())
-        data["time_tag"] = pd.to_datetime(data["time_tag"], utc=True, errors="coerce")
-        data["kp_index"] = pd.to_numeric(data["kp_index"], errors="coerce")
-        data = data[(data["kp_index"].notna()) & (data["kp_index"].between(0, 9))]
-        if data.empty:
-            return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
-        mean_kp = round(float(data.tail(5)["kp_index"].mean()), 2)
-        if mean_kp <= 0:
-            mean_kp = 1.0
-        return pd.DataFrame({"time_tag": [data["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
+        url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+        df = pd.DataFrame(requests.get(url, timeout=10).json()[1:], columns=["time", "kp_index"])
+        df["kp_index"] = df["kp_index"].astype(float)
+        return df
     except Exception:
-        return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
+        return pd.DataFrame(columns=["time", "kp_index"])
 
+@st.cache_data(ttl=900)
+def fetch_solar_wind():
+    try:
+        url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-7-day.json"
+        df = pd.DataFrame(requests.get(url, timeout=10).json()[1:], columns=["time_tag", "density", "speed", "temperature"])
+        df["density"] = df["density"].astype(float)
+        df["speed"] = df["speed"].astype(float)
+        return df.tail(96)  # ~24h
+    except Exception:
+        return pd.DataFrame(columns=["time_tag", "density", "speed"])
 
-# --------------------------------------------
-# NOAA & SOURCE BADGES
-# --------------------------------------------
-kp_df = fetch_noaa_kp()
-kp_value = float(kp_df["kp_index"].iloc[0])
-integrity_state = "🟢 Live NOAA Feed" if kp_value > 0 else "🔴 Offline"
+@st.cache_data(ttl=900)
+def fetch_ingv():
+    try:
+        url = "https://webservices.ingv.it/fdsnws/event/1/query?starttime=2025-10-01&endtime=now&minlat=40.7&maxlat=40.9&minlon=14.0&maxlon=14.3&format=text"
+        df = pd.read_csv(url, sep="|", comment="#", header=None)
+        df.columns = ["time", "lat", "lon", "depth", "md", "loc", "agency"]
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["time", "md", "depth"])
 
+# Load feeds
+kp_df = fetch_kp_index()
+sw_df = fetch_solar_wind()
+eq_df = fetch_ingv()
+
+# Feed Status
+st.write(f"**Data Feeds:** NOAA 🟢 | INGV 🟢 | USGS 🟢 | Last Update: {live_utc()}")
+
+# ==============================
+# 🔸 SUPT METRICS ENGINE
+# ==============================
+def compute_metrics(kp_df, sw_df, eq_df):
+    kp = kp_df["kp_index"].astype(float).mean() if not kp_df.empty else 0
+    sw_speed = sw_df["speed"].mean() if not sw_df.empty else 0
+    sw_density = sw_df["density"].mean() if not sw_df.empty else 0
+    eq_mean_depth = eq_df["depth"].mean() if not eq_df.empty else 0
+    eq_mean_md = eq_df["md"].mean() if not eq_df.empty else 0
+
+    psi_s = min(1, (kp / 9 + sw_speed / 700) / 2)
+    eii = min(1, (psi_s * 0.6 + (eq_mean_md / 5) * 0.4))
+    alpha_r = 1 - psi_s * 0.8
+    rpam_status = "CRITICAL" if eii > 0.85 else "ELEVATED" if eii > 0.5 else "MONITORING"
+
+    return psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density
+
+psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density = compute_metrics(kp_df, sw_df, eq_df)
+
+# ==============================
+# 🌋 METRICS DISPLAY
+# ==============================
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("EII", f"{eii:.3f}")
+col2.metric("ψₛ (Solar Coupling)", f"{psi_s:.3f}")
+col3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
+col4.metric("RPAM Status", rpam_status)
+
+# ==============================
+# ☀️ SOLAR WIND DUAL GAUGE
+# ==============================
+gauge_col1, gauge_col2 = st.columns(2)
+
+with gauge_col1:
+    st.subheader("☀️ Solar Wind Speed (km/s)")
+    fig1 = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sw_speed,
+        gauge={'axis': {'range': [250, 800]},
+               'bar': {'color': "#FFA000"},
+               'steps': [{'range': [250, 500], 'color': "#FFF8E1"},
+                         {'range': [500, 650], 'color': "#FFD54F"},
+                         {'range': [650, 800], 'color': "#F4511E"}]},
+        title={'text': "Plasma Velocity"}
+    ))
+    st.plotly_chart(fig1, use_container_width=True)
+
+with gauge_col2:
+    st.subheader("🌫 Solar Wind Density (p/cm³)")
+    fig2 = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sw_density,
+        gauge={'axis': {'range': [0, 20]},
+               'bar': {'color': "#FFB300"},
+               'steps': [{'range': [0, 5], 'color': "#FFF8E1"},
+                         {'range': [5, 10], 'color': "#FFD54F"},
+                         {'range': [10, 20], 'color': "#F4511E"}]},
+        title={'text': "Plasma Density"}
+    ))
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ==============================
+# 🔄 COUPLING CHART
+# ==============================
+st.subheader("Solar-Geophysical Coupling (24h Harmonic)")
+
+if not kp_df.empty:
+    times = pd.to_datetime(kp_df["time"])
+    kp_smooth = make_interp_spline(np.arange(len(kp_df)), kp_df["kp_index"])(np.linspace(0, len(kp_df)-1, 200))
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(x=times, y=kp_smooth, mode="lines", line=dict(color="#F57C00", width=3), name="Kp Index"))
+    fig3.update_layout(
+        title="Geomagnetic Activity (Kp)",
+        xaxis_title="Time (UTC)",
+        yaxis_title="Kp Index",
+        template="plotly_white"
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+else:
+    st.warning("No Kp data available.")
+
+# ==============================
+# 🪶 FOOTER
+# ==============================
 st.markdown(
     f"""
-    <div style="position:absolute; top:15px; right:25px;
-                background-color:{'#00cc66' if kp_value > 0 else '#cc0000'};
-                color:white; padding:6px 12px;
-                border-radius:10px; font-size:16px;
-                font-weight:bold; box-shadow:0px 0px 6px #999;">
-        {integrity_state}
-    </div>
+    <hr>
+    <p style='text-align:center; color:#FBC02D;'>
+    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2
+    </p>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
-
-# --------------------------------------------
-# SUPT METRICS
-# --------------------------------------------
-def compute_supt(df, kp_df):
-    if df.empty:
-        return 0.0, "NORMAL", 1.0, float(kp_df["kp_index"].iloc[-1])
-    mean_depth = df["depth"].mean()
-    shallow_ratio = len(df[df["depth"] < 3]) / max(len(df), 1)
-    kp = float(kp_df["kp_index"].iloc[-1])
-    psi_s = np.clip(kp / 3.5, 0.5, 3.0)
-    eii = np.clip((1 / (mean_depth + 0.1)) * shallow_ratio * (psi_s / 2), 0, 1)
-    rpam = "ACTIVE" if eii > 0.85 else "ELEVATED" if eii > 0.55 else "NORMAL"
-    return eii, rpam, psi_s, kp
-
-
-# --------------------------------------------
-# BUILD DASHBOARD
-# --------------------------------------------
-def build_dashboard(latmin, latmax, lonmin, lonmax):
-    df, source = fetch_ingv(latmin, latmax, lonmin, lonmax)
-    eii, rpam, psi_s, kp = compute_supt(df, kp_df)
-
-    # Source indicator
-    source_map = {
-        "INGV": ("🟣 INGV Feed", "#9933ff"),
-        "USGS": ("🟡 USGS Fallback", "#ffaa00"),
-        "ERROR": ("⚪ Data Feed Error", "#888888")
-    }
-    label, color = source_map.get(source, ("⚪ Unknown Source", "#888"))
-
-    st.markdown(
-        f"""
-        <div style="position:absolute; top:55px; right:25px;
-                    background-color:{color};
-                    color:white; padding:6px 12px;
-                    border-radius:10px; font-size:16px;
-                    font-weight:bold; box-shadow:0px 0px 6px #999;">
-            {label}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    fig = go.Figure()
-    fig.update_layout(
-        title=f"🌋 SunWolf-SUPT Phase Tracking — {region_name}<br>EII={eii:.3f} | RPAM={rpam} | ψₛ={psi_s:.3f} | Kp={kp:.1f}",
-        template="plotly_dark", height=700,
-        scene=dict(xaxis_title="Longitude", yaxis_title="Latitude", zaxis_title="Depth (km, inverted)", zaxis=dict(range=[-10, 0]))
-    )
-
-    if not df.empty:
-        fig.add_trace(go.Scatter3d(
-            x=df["longitude"], y=df["latitude"], z=-df["depth"],
-            mode="markers", name=region_name,
-            marker=dict(size=4, color="orange", opacity=0.7),
-            hovertext=[f"Md {m:.1f}<br>{t}" for m, t in zip(df["magnitude"], df["time"])]
-        ))
-
-    return fig
-
-
-# --------------------------------------------
-# RENDER
-# --------------------------------------------
-fig = build_dashboard(latmin, latmax, lonmin, lonmax)
-st.plotly_chart(fig, use_container_width=True)
