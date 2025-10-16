@@ -31,7 +31,7 @@ def live_utc():
 # ----------------------------------------------------------
 st.markdown(
     """
-    <h1 style='text-align:center; color:#ffb300;'>☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard ☀️</h1>
+    <h1 style='text-align:center; color:#ffb300;'> 🌞🐺SunWolf-SUPT: Solar Gold Forecast Dashboard </h1>
     <p style='text-align:center; color:#fbc02d;'>Real-time coupling between Solar & Geothermal Systems — SUPT ψ-Fold Engine</p>
     """,
     unsafe_allow_html=True,
