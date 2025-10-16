@@ -1,8 +1,7 @@
-# ==========================================================
-# ☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard v3.0
-# Real-time coupling between Solar & Geothermal Systems
-# Dynamic Background Glow + 3D Harmonic Drift + Live NOAA/USGS/INGV
-# ==========================================================
+# ==============================================================
+# ☀️ SunWolf-SUPT: Global Forecast Dashboard v3.5
+# Grok-Ready Fusion Edition (SUPT ψ-Fold + NOAA + INGV Live)
+# ==============================================================
 
 import streamlit as st
 import pandas as pd
@@ -11,232 +10,110 @@ import requests
 import plotly.graph_objs as go
 from datetime import datetime, timezone
 
-# ----------------------------------------------------------
-# Page Configuration
-# ----------------------------------------------------------
-st.set_page_config(
-    page_title="SunWolf-SUPT: Solar Gold Forecast Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="SunWolf-SUPT Global v3.5", layout="wide")
 
-# ----------------------------------------------------------
-# Live Clock & Styling
-# ----------------------------------------------------------
+# --------------------- 🕒 Helpers ---------------------
 def live_utc():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-def clock_pulse_html():
-    return """
-    <style>
-    @keyframes pulse {
-      0% {opacity: 0.3;}
-      50% {opacity: 1;}
-      100% {opacity: 0.3;}
-    }
-    .pulse-dot {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background-color: #fdd835;
-      animation: pulse 2s infinite;
-      margin-right: 6px;
-    }
-    </style>
-    <div class='pulse-dot'></div>
-    """
+def pulse_dot():
+    return """<style>
+    @keyframes pulse{0%{opacity:.3;}50%{opacity:1;}100%{opacity:.3;}}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;
+    background:#ffb300;animation:pulse 2s infinite;margin-right:5px;}
+    </style><div class='dot'></div>"""
 
-# ----------------------------------------------------------
-# Header
-# ----------------------------------------------------------
-st.markdown(
-    """
-    <h1 style='text-align:center; color:#ffb300;'>☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard ☀️</h1>
-    <p style='text-align:center; color:#fbc02d;'>Real-time coupling between Solar & Geothermal Systems — Live Forecast Engine</p>
-    """,
-    unsafe_allow_html=True,
-)
-
-col1, col2, col3 = st.columns([2, 3, 1])
-with col3:
-    st.markdown(clock_pulse_html() + f"<b>🕒 {live_utc()}</b>", unsafe_allow_html=True)
-
-# ----------------------------------------------------------
-# Data Fetching
-# ----------------------------------------------------------
+# --------------------- 🌞 Fetchers ---------------------
 @st.cache_data(ttl=900)
-def fetch_kp_index():
-    try:
-        url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-        df = pd.DataFrame(requests.get(url, timeout=10).json()[1:], columns=["time", "kp_index"])
-        df["kp_index"] = df["kp_index"].astype(float)
-        return df
-    except Exception:
-        return pd.DataFrame(columns=["time", "kp_index"])
-
-@st.cache_data(ttl=900)
-def fetch_solar_wind():
+def fetch_noaa_plasma():
     try:
         url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-7-day.json"
-        df = pd.DataFrame(requests.get(url, timeout=10).json()[1:], columns=["time_tag", "density", "speed", "temperature"])
+        df = pd.DataFrame(requests.get(url, timeout=10).json()[1:], columns=["time_tag","density","speed","temperature"])
         df["density"] = df["density"].astype(float)
         df["speed"] = df["speed"].astype(float)
         return df.tail(96)
-    except Exception:
-        return pd.DataFrame(columns=["time_tag", "density", "speed"])
+    except: return pd.DataFrame()
 
 @st.cache_data(ttl=900)
-def fetch_ingv():
+def fetch_ingv_cf():
     try:
         url = "https://webservices.ingv.it/fdsnws/event/1/query?starttime=2025-10-01&endtime=now&minlat=40.7&maxlat=40.9&minlon=14.0&maxlon=14.3&format=text"
         df = pd.read_csv(url, sep="|", comment="#", header=None)
-        df.columns = ["time", "lat", "lon", "depth", "md", "loc", "agency"]
+        df.columns = ["time","lat","lon","depth","md","loc","agency"]
         df["time"] = pd.to_datetime(df["time"], errors="coerce")
-        return df
-    except Exception:
-        return pd.DataFrame(columns=["time", "md", "depth"])
+        df = df[df["md"].notna()]
+        return df.tail(200)
+    except: return pd.DataFrame()
 
-kp_df = fetch_kp_index()
-sw_df = fetch_solar_wind()
-eq_df = fetch_ingv()
+# --------------------- ⚙️ SUPT Core ---------------------
+def compute_supt(df_seis, df_solar):
+    if df_seis.empty or df_solar.empty: return 0,0,0,"NO DATA","#9e9e9e"
+    md_mean, depth_mean = df_seis["md"].mean(), df_seis["depth"].mean()
+    shallow_ratio = np.mean(df_seis["depth"] <= 3.0)
+    sw_speed, density = df_solar["speed"].mean(), df_solar["density"].mean()
+    psi_s = min(1, (sw_speed/700 + density/10)/2)
+    eii = min(1, 0.45*psi_s + 0.35*shallow_ratio + 0.2*(md_mean/3))
+    alpha_r = round(1 - psi_s*0.8, 3)
+    if eii < .35: return psi_s,eii,alpha_r,"STABLE","#4FC3F7"
+    elif eii < .65: return psi_s,eii,alpha_r,"TRANSITIONAL","#FFB300"
+    else: return psi_s,eii,alpha_r,"CRITICAL","#E53935"
 
-st.write(f"**Data Feeds:** NOAA 🟢 | INGV 🟢 | USGS 🟢 | Last Update: {live_utc()}")
+# --------------------- 💡 Layout ---------------------
+st.markdown(f"<h1 style='text-align:center;color:#ffb300;'>☀️ SunWolf-SUPT Global Forecast Dashboard ☀️</h1>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align:center;color:#fbc02d;'>Grok-Ready Real-Time ψ-Fold & Geosolar Coupling Monitor</p>", unsafe_allow_html=True)
 
-# ----------------------------------------------------------
-# SUPT Metrics
-# ----------------------------------------------------------
-def compute_metrics(kp_df, sw_df, eq_df):
-    kp = kp_df["kp_index"].astype(float).mean() if not kp_df.empty else 0
-    sw_speed = sw_df["speed"].mean() if not sw_df.empty else 0
-    sw_density = sw_df["density"].mean() if not sw_df.empty else 0
-    eq_mean_md = eq_df["md"].mean() if not eq_df.empty else 0
+col1, col2, col3 = st.columns([2,3,1])
+with col3: st.markdown(pulse_dot()+f"<b>🕒 {live_utc()}</b>", unsafe_allow_html=True)
 
-    psi_s = min(1, (kp / 9 + sw_speed / 700) / 2)
-    eii = min(1, (psi_s * 0.6 + (eq_mean_md / 5) * 0.4))
-    alpha_r = 1 - psi_s * 0.8
+# Fetch Data
+solar = fetch_noaa_plasma()
+seismic = fetch_ingv_cf()
+psi_s, eii, alpha_r, rpam, color = compute_supt(seismic, solar)
 
-    if eii <= 0.35:
-        rpam_status = "STABLE"
-        color = "#4FC3F7"  # Blue
-    elif eii <= 0.65:
-        rpam_status = "TRANSITIONAL"
-        color = "#FFB300"  # Amber
-    else:
-        rpam_status = "CRITICAL"
-        color = "#E53935"  # Red
+# Dynamic background
+st.markdown(f"""
+<style>
+[data-testid="stAppViewContainer"] {{
+background:{'linear-gradient(180deg,#e3f2fd,#bbdefb)' if rpam=='STABLE' else 
+'linear-gradient(180deg,#fff8e1,#ffe082)' if rpam=='TRANSITIONAL' else 
+'linear-gradient(180deg,#ffebee,#ef5350)'} !important; transition:1s;
+}}
+</style>""", unsafe_allow_html=True)
 
-    return psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density, color
+# Metrics Display
+st.markdown(f"<div style='background:{color};padding:10px;border-radius:10px;text-align:center;'><b style='color:white;'>RPAM: {rpam}</b></div>", unsafe_allow_html=True)
+c1,c2,c3,c4 = st.columns(4)
+c1.metric("EII", f"{eii:.3f}")
+c2.metric("ψₛ (Solar Coupling)", f"{psi_s:.3f}")
+c3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
+c4.metric("Phase", rpam)
 
-psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density, color = compute_metrics(kp_df, sw_df, eq_df)
-
-# ----------------------------------------------------------
-# Dynamic Background Glow
-# ----------------------------------------------------------
-def apply_dynamic_background(color, state):
-    if state == "STABLE":
-        gradient = """
-        <style>
-        [data-testid="stAppViewContainer"] {
-            background: linear-gradient(180deg, #e3f2fd 0%, #bbdefb 100%) !important;
-            transition: background 1s ease;
-        }
-        </style>
-        """
-    elif state == "TRANSITIONAL":
-        gradient = """
-        <style>
-        @keyframes amberPulse {
-            0% {background-color: #fff3e0;}
-            50% {background-color: #ffe082;}
-            100% {background-color: #fff3e0;}
-        }
-        [data-testid="stAppViewContainer"] {
-            animation: amberPulse 8s infinite;
-            transition: background 1s ease;
-        }
-        </style>
-        """
-    elif state == "CRITICAL":
-        gradient = """
-        <style>
-        @keyframes redPulse {
-            0% {background-color: #ffebee;}
-            50% {background-color: #ef5350;}
-            100% {background-color: #ffebee;}
-        }
-        [data-testid="stAppViewContainer"] {
-            animation: redPulse 6s infinite;
-            transition: background 1s ease;
-        }
-        </style>
-        """
-    else:
-        gradient = "<style>[data-testid='stAppViewContainer']{background-color:white;}</style>"
-
-    st.markdown(gradient, unsafe_allow_html=True)
-
-apply_dynamic_background(color, rpam_status)
-
-# ----------------------------------------------------------
-# Display Metrics
-# ----------------------------------------------------------
-st.markdown(
-    f"""
-    <div style='background-color:{color}; padding:10px; border-radius:10px; text-align:center;'>
-    <b style='color:white;'>RPAM Status: {rpam_status}</b>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("EII", f"{eii:.3f}")
-col2.metric("ψₛ (Solar Coupling)", f"{psi_s:.3f}")
-col3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
-col4.metric("Phase", rpam_status)
-
-# ----------------------------------------------------------
 # Gauges
-# ----------------------------------------------------------
-gauge_col1, gauge_col2 = st.columns(2)
+g1,g2 = st.columns(2)
+if not solar.empty:
+    with g1:
+        st.subheader("☀️ Solar Wind Speed (km/s)")
+        fig1 = go.Figure(go.Indicator(mode="gauge+number", value=solar["speed"].mean(),
+            gauge={'axis':{'range':[250,800]},'bar':{'color':color},
+                    'steps':[{'range':[250,500],'color':"#FFF8E1"},
+                             {'range':[500,650],'color':"#FFD54F"},
+                             {'range':[650,800],'color':"#F4511E"}]},
+            title={'text':"Plasma Velocity"}))
+        st.plotly_chart(fig1, use_container_width=True)
+    with g2:
+        st.subheader("🌫 Solar Wind Density (p/cm³)")
+        fig2 = go.Figure(go.Indicator(mode="gauge+number", value=solar["density"].mean(),
+            gauge={'axis':{'range':[0,20]},'bar':{'color':color},
+                    'steps':[{'range':[0,5],'color':"#FFF8E1"},
+                             {'range':[5,10],'color':"#FFD54F"},
+                             {'range':[10,20],'color':"#F4511E"}]},
+            title={'text':"Plasma Density"}))
+        st.plotly_chart(fig2, use_container_width=True)
 
-with gauge_col1:
-    st.subheader("☀️ Solar Wind Speed (km/s)")
-    fig1 = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=sw_speed,
-        gauge={'axis': {'range': [250, 800]},
-               'bar': {'color': color},
-               'steps': [{'range': [250, 500], 'color': "#FFF8E1"},
-                         {'range': [500, 650], 'color': "#FFD54F"},
-                         {'range': [650, 800], 'color': "#F4511E"}]},
-        title={'text': "Plasma Velocity"}
-    ))
-    st.plotly_chart(fig1, use_container_width=True)
+# Seismic Depth Distribution
+if not seismic.empty:
+    st.subheader("Campi Flegrei Seismic Depth Distribution (Live INGV)")
+    st.bar_chart(np.histogram(seismic["depth"], bins=15, range=(0,5))[0])
 
-with gauge_col2:
-    st.subheader("🌫 Solar Wind Density (p/cm³)")
-    fig2 = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=sw_density,
-        gauge={'axis': {'range': [0, 20]},
-               'bar': {'color': color},
-               'steps': [{'range': [0, 5], 'color': "#FFF8E1"},
-                         {'range': [5, 10], 'color': "#FFD54F"},
-                         {'range': [10, 20], 'color': "#F4511E"}]},
-        title={'text': "Plasma Density"}
-    ))
-    st.plotly_chart(fig2, use_container_width=True)
-
-# ----------------------------------------------------------
 # Footer
-# ----------------------------------------------------------
-st.markdown(
-    f"""
-    <hr><p style='text-align:center; color:#FBC02D;'>
-    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v3.0
-    </p>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(f"<hr><p style='text-align:center;color:#FBC02D;'>Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v3.5</p>", unsafe_allow_html=True)
