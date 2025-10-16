@@ -37,20 +37,28 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
         st.warning(f"⚠️ INGV fetch failed: {e}")
         return pd.DataFrame()
 
+# --- PATCHED NOAA FETCH ---
 @st.cache_data(ttl=900)
 def fetch_noaa_kp():
-    """Fetch latest geomagnetic Kp index from NOAA SWPC."""
+    """Fetch latest geomagnetic Kp index from NOAA SWPC with flexible field detection."""
     try:
         url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
         r = requests.get(url, timeout=15)
         data = r.json()
         df = pd.DataFrame(data[1:], columns=data[0])
-        df["time_tag"] = pd.to_datetime(df["time_tag"], utc=True)
-        df["kp_index"] = pd.to_numeric(df["kp_index"], errors="coerce")
+        df.columns = [c.lower().strip() for c in df.columns]
+        df["time_tag"] = pd.to_datetime(df["time_tag"], utc=True, errors="coerce")
+        # Detect which column holds Kp
+        kp_col = next((c for c in df.columns if "kp" in c and "index" in c), None)
+        if kp_col is None:
+            # fallback: last numeric column
+            kp_col = [c for c in df.columns if df[c].apply(lambda x: str(x).replace('.', '', 1).isdigit()).any()][-1]
+        df["kp_index"] = pd.to_numeric(df[kp_col], errors="coerce")
         return df.tail(8)
     except Exception as e:
         st.warning(f"⚠️ NOAA Kp fetch failed: {e}")
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
+
 
 # =========================================
 # ========== SUPT COMPUTATION CORE ========
