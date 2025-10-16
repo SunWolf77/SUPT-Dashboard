@@ -190,7 +190,7 @@ psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density, color = compute_supt_met
 # HEADER
 # ==========================================================
 st.markdown(
-    f"<h1 style='text-align:center; color:#FFA000;'>☀️🐺 SunWolf-SUPT: Solar Gold Forecast Dashboard</h1>"
+    f"<h1 style='text-align:center; color:#FFA000;'>🌞🐺 SunWolf-SUPT: Solar Gold Forecast Dashboard</h1>"
     f"<p style='text-align:center; color:#FBC02D;'>Real-time coupling between Solar & Geothermal Systems — SUPT ψ-Fold Engine</p>"
     f"<p style='text-align:right; color:gray;'>🕒 Updated: {live_utc()}</p>",
     unsafe_allow_html=True,
