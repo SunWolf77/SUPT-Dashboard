@@ -68,32 +68,37 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
 
 @st.cache_data(ttl=900)
 def fetch_noaa_kp():
-    """Fetch latest geomagnetic Kp index from NOAA SWPC with robust filtering."""
+    """Fetch the latest *observed* geomagnetic Kp index from NOAA, fallback to forecast."""
     try:
-        url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-        r = requests.get(url, timeout=15)
-        data = r.json()
-        df = pd.DataFrame(data[1:], columns=data[0])
-        df.columns = [c.lower().strip() for c in df.columns]
-        df["time_tag"] = pd.to_datetime(df.get("time_tag", pd.NaT), utc=True, errors="coerce")
+        # Primary: current 3-hourly observed Kp
+        url_obs = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
+        r_obs = requests.get(url_obs, timeout=15)
+        data_obs = pd.DataFrame(r_obs.json())
+        data_obs["time_tag"] = pd.to_datetime(data_obs["time_tag"], utc=True, errors="coerce")
+        data_obs["kp_index"] = pd.to_numeric(data_obs["kp_index"], errors="coerce")
+        df_obs = data_obs[(data_obs["kp_index"].notna()) & (data_obs["kp_index"].between(0, 9))]
+        if not df_obs.empty:
+            recent = df_obs.tail(3)
+            mean_kp = float(recent["kp_index"].mean())
+            return pd.DataFrame({"time_tag": [recent["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
 
-        # find the best column for Kp values
-        kp_col = next((c for c in df.columns if "kp" in c and "index" in c), None)
-        if kp_col is None:
-            kp_col = [c for c in df.columns if df[c].apply(lambda x: str(x).replace('.', '', 1).isdigit()).any()][-1]
+        # Secondary fallback: forecast table
+        url_fore = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+        r_fore = requests.get(url_fore, timeout=15)
+        data_fore = r_fore.json()
+        df_fore = pd.DataFrame(data_fore[1:], columns=data_fore[0])
+        df_fore.columns = [c.lower().strip() for c in df_fore.columns]
+        df_fore["time_tag"] = pd.to_datetime(df_fore.get("time_tag", pd.NaT), utc=True, errors="coerce")
+        kp_col = next((c for c in df_fore.columns if "kp" in c and "index" in c), None)
+        df_fore["kp_index"] = pd.to_numeric(df_fore[kp_col], errors="coerce")
+        df_fore = df_fore[(df_fore["kp_index"].notna()) & (df_fore["kp_index"].between(0, 9))]
+        recent_fore = df_fore.tail(2)
+        mean_kp_fore = float(recent_fore["kp_index"].mean())
+        return pd.DataFrame({"time_tag": [recent_fore["time_tag"].iloc[-1]], "kp_index": [mean_kp_fore]})
 
-        df["kp_index"] = pd.to_numeric(df[kp_col], errors="coerce")
-
-        # filter out nulls and out-of-range artifacts
-        df = df[(df["kp_index"].notna()) & (df["kp_index"].between(0, 9))]
-
-        # average last 2 valid entries to smooth partial feed spikes
-        valid = df["kp_index"].tail(2)
-        mean_kp = valid.mean() if not valid.empty else 1.0
-
-        return pd.DataFrame({"time_tag": [df["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
     except Exception as e:
         st.warning(f"⚠️ NOAA Kp fetch failed: {e}")
+        # default safe Kp value
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
 
 
