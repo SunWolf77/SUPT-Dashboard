@@ -110,6 +110,32 @@ def fetch_noaa_kp():
         st.warning(f"⚠️ NOAA Kp fetch failed: {e}")
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
 
+# Determine data integrity state
+if "kp_index" in kp_df.columns:
+    if kp_df["kp_index"].iloc[0] > 0:
+        integrity_state = "🟢 Live NOAA Feed"
+        integrity_color = "#00cc66"
+    else:
+        integrity_state = "🟡 Forecast Mode"
+        integrity_color = "#ffaa00"
+else:
+    integrity_state = "🔴 Offline"
+    integrity_color = "#cc0000"
+
+# Display top-right badge
+st.markdown(
+    f"""
+    <div style="position:absolute; top:15px; right:25px; 
+                background-color:{integrity_color}; 
+                color:white; padding:6px 12px; 
+                border-radius:10px; font-size:16px; 
+                font-weight:bold; box-shadow:0px 0px 6px #999;">
+        {integrity_state}
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 
 # --------------------------------------------
 # SUPT COMPUTATION CORE
