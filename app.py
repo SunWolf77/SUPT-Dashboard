@@ -10,7 +10,7 @@ import time
 # PAGE CONFIG
 # --------------------------------------------
 st.set_page_config(page_title="SunWolf-SUPT :: Global Forecast Dashboard", layout="wide")
-st.title("☀️ SunWolf-SUPT :: Global Live Forecast Dashboard")
+st.title("🌞🐺 SunWolf-SUPT :: Global Live Forecast Dashboard")
 st.caption("Powered by SUPT ψ-Fold + NOAA + INGV Real-Time Data Fusion")
 
 # --------------------------------------------
