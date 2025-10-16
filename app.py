@@ -1,5 +1,5 @@
 # ==============================================================
-# ☀️ SunWolf-SUPT: Global Forecast Dashboard v3.5
+#  🌞🐺 SunWolf-SUPT: Global Forecast Dashboard v3.5
 # Grok-Ready Fusion Edition (SUPT ψ-Fold + NOAA + INGV Live)
 # ==============================================================
 
@@ -59,7 +59,7 @@ def compute_supt(df_seis, df_solar):
     else: return psi_s,eii,alpha_r,"CRITICAL","#E53935"
 
 # --------------------- 💡 Layout ---------------------
-st.markdown(f"<h1 style='text-align:center;color:#ffb300;'>☀️ SunWolf-SUPT Global Forecast Dashboard ☀️</h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='text-align:center;color:#ffb300;'> 🌞🐺SunWolf-SUPT Global Forecast Dashboard </h1>", unsafe_allow_html=True)
 st.markdown(f"<p style='text-align:center;color:#fbc02d;'>Grok-Ready Real-Time ψ-Fold & Geosolar Coupling Monitor</p>", unsafe_allow_html=True)
 
 col1, col2, col3 = st.columns([2,3,1])
