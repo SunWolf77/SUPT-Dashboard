@@ -1,4 +1,4 @@
-# SunWolf-SUPT: Solar Gold Forecast Dashboard
+# SunWolf-SUPT: Solar Gold Forecast Dashboard (NumPy Smoothing Edition)
 # Live NOAA Solar Wind + INGV Seismic + SUPT Predictive Metrics
 # by SUPT / SunWolf Initiative, 2025
 
@@ -8,11 +8,10 @@ import numpy as np
 import requests
 import plotly.graph_objs as go
 from datetime import datetime, timezone
-from scipy.interpolate import make_interp_spline
 
 st.set_page_config(page_title="SunWolf-SUPT: Solar Gold Forecast Dashboard", layout="wide")
 
-# 🌞 Title & Header
+# 🌞 Title
 st.markdown(
     """
     <h1 style='text-align:center; color:#ffb300;'>☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard ☀️</h1>
@@ -49,7 +48,7 @@ def fetch_solar_wind():
         df = pd.DataFrame(requests.get(url, timeout=10).json()[1:], columns=["time_tag", "density", "speed", "temperature"])
         df["density"] = df["density"].astype(float)
         df["speed"] = df["speed"].astype(float)
-        return df.tail(96)  # ~24h
+        return df.tail(96)
     except Exception:
         return pd.DataFrame(columns=["time_tag", "density", "speed"])
 
@@ -69,7 +68,6 @@ kp_df = fetch_kp_index()
 sw_df = fetch_solar_wind()
 eq_df = fetch_ingv()
 
-# Feed Status
 st.write(f"**Data Feeds:** NOAA 🟢 | INGV 🟢 | USGS 🟢 | Last Update: {live_utc()}")
 
 # ==============================
@@ -134,15 +132,25 @@ with gauge_col2:
     st.plotly_chart(fig2, use_container_width=True)
 
 # ==============================
-# 🔄 COUPLING CHART
+# 🔄 COUPLING CHART (NumPy Smooth)
 # ==============================
-st.subheader("Solar-Geophysical Coupling (24h Harmonic)")
+st.subheader("Solar-Geophysical Coupling (24h Harmonic Trend)")
 
 if not kp_df.empty:
     times = pd.to_datetime(kp_df["time"])
-    kp_smooth = make_interp_spline(np.arange(len(kp_df)), kp_df["kp_index"])(np.linspace(0, len(kp_df)-1, 200))
+    y = kp_df["kp_index"].astype(float).values
+    x = np.arange(len(y))
+    xnew = np.linspace(0, len(x) - 1, 200)
+    kp_smooth = np.interp(xnew, x, y)
+
     fig3 = go.Figure()
-    fig3.add_trace(go.Scatter(x=times, y=kp_smooth, mode="lines", line=dict(color="#F57C00", width=3), name="Kp Index"))
+    fig3.add_trace(go.Scatter(
+        x=times.iloc[:len(kp_smooth)],
+        y=kp_smooth,
+        mode="lines",
+        line=dict(color="#F57C00", width=3),
+        name="Kp Index (Smoothed)"
+    ))
     fig3.update_layout(
         title="Geomagnetic Activity (Kp)",
         xaxis_title="Time (UTC)",
@@ -160,7 +168,7 @@ st.markdown(
     f"""
     <hr>
     <p style='text-align:center; color:#FBC02D;'>
-    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2
+    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2 (NumPy)
     </p>
     """,
     unsafe_allow_html=True,
