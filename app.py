@@ -60,47 +60,83 @@ def fetch_solar_wind():
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_ingv_quakes():
     """
-    Real-time INGV FDSNWS query for Campi Flegrei (past 7 days).
+    Robust real-time INGV FDSNWS query for Campi Flegrei (past 7 days).
+    Handles dynamic header variations in live 'text' feed.
     """
+    import io
+    import datetime as dt
+
     try:
         end_time = dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
         start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
+
         url = (
             f"https://webservices.ingv.it/fdsnws/event/1/query?"
             f"starttime={start_time}&endtime={end_time}"
             f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3"
             f"&minmag=0.0&maxmag=5.0&format=text"
         )
-        response = requests.get(url, timeout=15)
+
+        response = requests.get(url, timeout=20)
         response.raise_for_status()
-        df = pd.read_csv(io.StringIO(response.text), delimiter="|", comment="#")
+        text_data = response.text.strip()
+
+        # Detect if the INGV response is empty or invalid
+        if not text_data or "No events were found" in text_data:
+            st.warning("⚠️ INGV returned empty response. Using fallback dataset.")
+            raise ValueError("Empty INGV response")
+
+        # Parse pipe-delimited format safely
+        df = pd.read_csv(io.StringIO(text_data), delimiter="|", comment="#")
+        df.columns = [c.strip() for c in df.columns]
+
+        # Dynamically detect time column
+        time_col_candidates = [c for c in df.columns if c.lower().startswith("time")]
+        if not time_col_candidates:
+            raise KeyError("No valid Time column in INGV feed")
+        time_col = time_col_candidates[0]
+
+        # Rename columns for consistency
         df = df.rename(columns={
-            "Time": "Time", "Latitude": "Lat", "Longitude": "Lon",
-            "Depth(km)": "Depth/km", "Magnitude": "Mag",
+            time_col: "Time",
+            "Latitude": "Lat",
+            "Longitude": "Lon",
+            "Depth(km)": "Depth/km",
+            "Magnitude": "Mag",
             "Location": "Loc"
         })
+
+        # Standardize and clean
         df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-        df["Mag"] = pd.to_numeric(df["Mag"], errors="coerce")
-        df["Depth/km"] = pd.to_numeric(df["Depth/km"], errors="coerce")
-        df = df.dropna(subset=["Depth/km", "Mag"])
+        if "Mag" not in df.columns and "Magnitude" in df.columns:
+            df["Mag"] = pd.to_numeric(df["Magnitude"], errors="coerce")
+        df["Depth/km"] = pd.to_numeric(df.get("Depth/km", np.nan), errors="coerce")
+
+        # Filter valid and recent quakes
+        df = df.dropna(subset=["Time", "Depth/km"])
         df = df[df["Time"] > (dt.datetime.utcnow() - dt.timedelta(days=7))]
+
         if df.empty:
-            st.warning("⚠️ INGV returned no recent events — fallback activated.")
-            return pd.DataFrame(columns=["Time", "Mag", "Depth/km", "Loc"])
+            raise ValueError("Parsed INGV DataFrame empty after cleaning")
+
         return df.tail(200)
+
     except Exception as e:
         st.warning(f"INGV API fetch failed: {e}. Using fallback dataset.")
         try:
             seismic_path = "data/seismic_local.csv"
             df = pd.read_csv(seismic_path)
             df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-            df["Mag"] = pd.to_numeric(df["MD"], errors="coerce")
-            df["Depth/km"] = pd.to_numeric(df["Depth"], errors="coerce")
+            df["Mag"] = pd.to_numeric(df.get("MD", df.get("Magnitude", 0.8)), errors="coerce")
+            df["Depth/km"] = pd.to_numeric(df.get("Depth", 1.8), errors="coerce")
             return df[df["Time"] > (dt.datetime.utcnow() - dt.timedelta(days=7))]
         except Exception:
+            # Final synthetic fallback
             return pd.DataFrame({
                 "Time": [dt.datetime.utcnow()],
-                "Mag": [0.9], "Depth/km": [1.8], "Loc": ["Synthetic Event"]
+                "Mag": [0.9],
+                "Depth/km": [1.8],
+                "Loc": ["Synthetic Event"]
             })
 
 # ==========================================================
