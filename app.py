@@ -46,22 +46,51 @@ st.sidebar.success(f"Fetching live data for **{region_name}** region")
 # --------------------------------------------
 @st.cache_data(ttl=900)
 def fetch_ingv(latmin, latmax, lonmin, lonmax):
-    """Fetch localized INGV/USGS seismic data."""
+    """Fetch localized INGV/USGS seismic data with fallback."""
     try:
         url = (
             f"https://webservices.ingv.it/fdsnws/event/1/query?"
-            f"starttime=2025-10-01&endtime=now&latmin={latmin}&latmax={latmax}&"
+            f"starttime=2025-09-01&endtime=now&latmin={latmin}&latmax={latmax}&"
             f"lonmin={lonmin}&lonmax={lonmax}&minmag=-0.5&maxmag=6&format=csv"
         )
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=20)
+
+        # --- Case 1: Empty or bad CSV ---
+        if not r.text.strip() or "Error" in r.text:
+            st.warning("⚠️ INGV returned no data; switching to USGS fallback.")
+            usgs_url = (
+                f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
+                f"format=geojson&starttime=2025-09-01&endtime=now"
+                f"&minlatitude={latmin}&maxlatitude={latmax}"
+                f"&minlongitude={lonmin}&maxlongitude={lonmax}&minmagnitude=-0.5"
+            )
+            usgs_r = requests.get(usgs_url, timeout=20).json()
+            features = usgs_r.get("features", [])
+            if not features:
+                return pd.DataFrame()
+            df = pd.DataFrame([
+                {
+                    "time": pd.to_datetime(f["properties"]["time"], unit="ms", utc=True),
+                    "latitude": f["geometry"]["coordinates"][1],
+                    "longitude": f["geometry"]["coordinates"][0],
+                    "depth": f["geometry"]["coordinates"][2],
+                    "magnitude": f["properties"]["mag"],
+                    "place": f["properties"]["place"],
+                }
+                for f in features
+            ])
+            return df
+
+        # --- Case 2: Normal INGV CSV ---
         df = pd.read_csv(io.StringIO(r.text))
         df.rename(columns=lambda x: x.strip().lower(), inplace=True)
         df["depth"] = pd.to_numeric(df.get("depth", np.nan), errors="coerce")
         df["magnitude"] = pd.to_numeric(df.get("magnitude", np.nan), errors="coerce")
         df["time"] = pd.to_datetime(df.get("time", pd.NaT), utc=True, errors="coerce")
         return df.dropna(subset=["depth", "magnitude"])
+
     except Exception as e:
-        st.warning(f"⚠️ INGV fetch failed: {e}")
+        st.error(f"🚨 INGV/USGS feed error: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=900)
