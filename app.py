@@ -46,7 +46,7 @@ st.sidebar.success(f"Fetching live data for **{region_name}** region")
 # --------------------------------------------
 @st.cache_data(ttl=900)
 def fetch_ingv(latmin, latmax, lonmin, lonmax):
-    """Fetch localized INGV/USGS seismic data with fallback."""
+    """Fetch INGV or fallback to USGS if empty."""
     try:
         url = (
             f"https://webservices.ingv.it/fdsnws/event/1/query?"
@@ -55,7 +55,6 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
         )
         r = requests.get(url, timeout=20)
 
-        # --- Case 1: Empty or bad CSV ---
         if not r.text.strip() or "Error" in r.text:
             st.warning("⚠️ INGV returned no data; switching to USGS fallback.")
             usgs_url = (
@@ -67,7 +66,7 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
             usgs_r = requests.get(usgs_url, timeout=20).json()
             features = usgs_r.get("features", [])
             if not features:
-                return pd.DataFrame()
+                return pd.DataFrame(), "USGS"
             df = pd.DataFrame([
                 {
                     "time": pd.to_datetime(f["properties"]["time"], unit="ms", utc=True),
@@ -79,75 +78,51 @@ def fetch_ingv(latmin, latmax, lonmin, lonmax):
                 }
                 for f in features
             ])
-            return df
+            return df, "USGS"
 
-        # --- Case 2: Normal INGV CSV ---
         df = pd.read_csv(io.StringIO(r.text))
         df.rename(columns=lambda x: x.strip().lower(), inplace=True)
         df["depth"] = pd.to_numeric(df.get("depth", np.nan), errors="coerce")
         df["magnitude"] = pd.to_numeric(df.get("magnitude", np.nan), errors="coerce")
         df["time"] = pd.to_datetime(df.get("time", pd.NaT), utc=True, errors="coerce")
-        return df.dropna(subset=["depth", "magnitude"])
+        return df.dropna(subset=["depth", "magnitude"]), "INGV"
 
     except Exception as e:
         st.error(f"🚨 INGV/USGS feed error: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), "ERROR"
+
 
 @st.cache_data(ttl=900)
 def fetch_noaa_kp():
-    """Fetch the latest observed geomagnetic Kp index from NOAA with robust smoothing and fallback."""
+    """Fetch NOAA Kp Index with fallback."""
     try:
-        url_obs = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
-        r_obs = requests.get(url_obs, timeout=15)
-        data_obs = pd.DataFrame(r_obs.json())
-        data_obs["time_tag"] = pd.to_datetime(data_obs["time_tag"], utc=True, errors="coerce")
-        data_obs["kp_index"] = pd.to_numeric(data_obs["kp_index"], errors="coerce")
-        data_obs = data_obs[(data_obs["kp_index"].notna()) & (data_obs["kp_index"].between(0, 9))]
-
-        if not data_obs.empty:
-            valid = data_obs.tail(5)
-            mean_kp = round(float(valid["kp_index"].mean()), 2)
-            if mean_kp <= 0:
-                mean_kp = 1.0
-            return pd.DataFrame({"time_tag": [valid["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
-
-        url_fore = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-        r_fore = requests.get(url_fore, timeout=15)
-        data_fore = r_fore.json()
-        df_fore = pd.DataFrame(data_fore[1:], columns=data_fore[0])
-        df_fore.columns = [c.lower().strip() for c in df_fore.columns]
-        df_fore["time_tag"] = pd.to_datetime(df_fore.get("time_tag", pd.NaT), utc=True, errors="coerce")
-        kp_col = next((c for c in df_fore.columns if "kp" in c and "index" in c), None)
-        df_fore["kp_index"] = pd.to_numeric(df_fore[kp_col], errors="coerce")
-        df_fore = df_fore[(df_fore["kp_index"].notna()) & (df_fore["kp_index"].between(0, 9))]
-        mean_kp_fore = round(float(df_fore["kp_index"].tail(3).mean()), 2)
-        if mean_kp_fore <= 0:
-            mean_kp_fore = 1.0
-        return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [mean_kp_fore]})
+        url = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
+        r = requests.get(url, timeout=15)
+        data = pd.DataFrame(r.json())
+        data["time_tag"] = pd.to_datetime(data["time_tag"], utc=True, errors="coerce")
+        data["kp_index"] = pd.to_numeric(data["kp_index"], errors="coerce")
+        data = data[(data["kp_index"].notna()) & (data["kp_index"].between(0, 9))]
+        if data.empty:
+            return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
+        mean_kp = round(float(data.tail(5)["kp_index"].mean()), 2)
+        if mean_kp <= 0:
+            mean_kp = 1.0
+        return pd.DataFrame({"time_tag": [data["time_tag"].iloc[-1]], "kp_index": [mean_kp]})
     except Exception:
         return pd.DataFrame({"time_tag": [pd.Timestamp.utcnow()], "kp_index": [1.0]})
 
+
 # --------------------------------------------
-# INTEGRITY INDICATOR LOGIC
+# NOAA & SOURCE BADGES
 # --------------------------------------------
 kp_df = fetch_noaa_kp()
-
-if "kp_index" in kp_df.columns and not kp_df.empty:
-    kp_value = float(kp_df["kp_index"].iloc[0])
-    if kp_value > 0:
-        integrity_state = "🟢 Live NOAA Feed"
-        integrity_color = "#00cc66"
-    else:
-        integrity_state = "🟡 Forecast Mode"
-        integrity_color = "#ffaa00"
-else:
-    integrity_state = "🔴 Offline"
-    integrity_color = "#cc0000"
+kp_value = float(kp_df["kp_index"].iloc[0])
+integrity_state = "🟢 Live NOAA Feed" if kp_value > 0 else "🔴 Offline"
 
 st.markdown(
     f"""
     <div style="position:absolute; top:15px; right:25px;
-                background-color:{integrity_color};
+                background-color:{'#00cc66' if kp_value > 0 else '#cc0000'};
                 color:white; padding:6px 12px;
                 border-radius:10px; font-size:16px;
                 font-weight:bold; box-shadow:0px 0px 6px #999;">
@@ -157,10 +132,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.caption(f"Powered by SUPT ψ-Fold • NOAA • INGV | Real-Time Data Fusion | Data Integrity Status: {integrity_state}")
-
 # --------------------------------------------
-# SUPT COMPUTATION
+# SUPT METRICS
 # --------------------------------------------
 def compute_supt(df, kp_df):
     if df.empty:
@@ -173,12 +146,34 @@ def compute_supt(df, kp_df):
     rpam = "ACTIVE" if eii > 0.85 else "ELEVATED" if eii > 0.55 else "NORMAL"
     return eii, rpam, psi_s, kp
 
+
 # --------------------------------------------
-# BUILD & RENDER
+# BUILD DASHBOARD
 # --------------------------------------------
 def build_dashboard(latmin, latmax, lonmin, lonmax):
-    df = fetch_ingv(latmin, latmax, lonmin, lonmax)
+    df, source = fetch_ingv(latmin, latmax, lonmin, lonmax)
     eii, rpam, psi_s, kp = compute_supt(df, kp_df)
+
+    # Source indicator
+    source_map = {
+        "INGV": ("🟣 INGV Feed", "#9933ff"),
+        "USGS": ("🟡 USGS Fallback", "#ffaa00"),
+        "ERROR": ("⚪ Data Feed Error", "#888888")
+    }
+    label, color = source_map.get(source, ("⚪ Unknown Source", "#888"))
+
+    st.markdown(
+        f"""
+        <div style="position:absolute; top:55px; right:25px;
+                    background-color:{color};
+                    color:white; padding:6px 12px;
+                    border-radius:10px; font-size:16px;
+                    font-weight:bold; box-shadow:0px 0px 6px #999;">
+            {label}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     fig = go.Figure()
     fig.update_layout(
@@ -197,5 +192,9 @@ def build_dashboard(latmin, latmax, lonmin, lonmax):
 
     return fig
 
+
+# --------------------------------------------
+# RENDER
+# --------------------------------------------
 fig = build_dashboard(latmin, latmax, lonmin, lonmax)
 st.plotly_chart(fig, use_container_width=True)
