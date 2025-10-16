@@ -1,7 +1,6 @@
 # ==========================================================
 # ☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard
-# Real-time coupling between Solar & Geothermal Systems
-# with 3D Auto-Rotating Harmonic Memory
+# Color-coded SUPT Harmonic State + Auto-Rotating 3D Phase
 # ==========================================================
 
 import streamlit as st
@@ -116,20 +115,38 @@ def compute_metrics(kp_df, sw_df, eq_df):
     psi_s = min(1, (kp / 9 + sw_speed / 700) / 2)
     eii = min(1, (psi_s * 0.6 + (eq_mean_md / 5) * 0.4))
     alpha_r = 1 - psi_s * 0.8
-    rpam_status = "CRITICAL" if eii > 0.85 else "ELEVATED" if eii > 0.5 else "MONITORING"
 
-    return psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density
+    # Define harmonic state
+    if eii <= 0.35:
+        rpam_status = "STABLE"
+        color = "#4FC3F7"  # Blue
+    elif eii <= 0.65:
+        rpam_status = "TRANSITIONAL"
+        color = "#FFB300"  # Amber
+    else:
+        rpam_status = "CRITICAL"
+        color = "#E53935"  # Red
 
-psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density = compute_metrics(kp_df, sw_df, eq_df)
+    return psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density, color
+
+psi_s, eii, alpha_r, rpam_status, sw_speed, sw_density, color = compute_metrics(kp_df, sw_df, eq_df)
 
 # ----------------------------------------------------------
 # Display Metrics
 # ----------------------------------------------------------
+st.markdown(
+    f"""
+    <div style='background-color:{color}; padding:10px; border-radius:10px; text-align:center;'>
+    <b style='color:white;'>RPAM Status: {rpam_status}</b>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("EII", f"{eii:.3f}")
 col2.metric("ψₛ (Solar Coupling)", f"{psi_s:.3f}")
 col3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
-col4.metric("RPAM Status", rpam_status)
+col4.metric("Phase", rpam_status)
 
 # ----------------------------------------------------------
 # Gauges
@@ -165,29 +182,7 @@ with gauge_col2:
     st.plotly_chart(fig2, use_container_width=True)
 
 # ----------------------------------------------------------
-# Harmonic Coupling
-# ----------------------------------------------------------
-st.subheader("Solar-Geophysical Coupling (24h Harmonic Trend)")
-if not kp_df.empty:
-    times = pd.to_datetime(kp_df["time"])
-    y = kp_df["kp_index"].astype(float).values
-    x = np.arange(len(y))
-    xnew = np.linspace(0, len(x) - 1, 200)
-    kp_smooth = np.interp(xnew, x, y)
-
-    fig3 = go.Figure()
-    fig3.add_trace(go.Scatter(
-        x=times.iloc[:len(kp_smooth)],
-        y=kp_smooth,
-        mode="lines",
-        line=dict(color="#F57C00", width=3),
-        name="Kp Index (Smoothed)"
-    ))
-    fig3.update_layout(title="Geomagnetic Activity (Kp)", xaxis_title="Time (UTC)", yaxis_title="Kp Index", template="plotly_white")
-    st.plotly_chart(fig3, use_container_width=True)
-
-# ----------------------------------------------------------
-# Auto-Rotating 3D Harmonic Memory
+# Auto-Rotating 3D Harmonic Memory (Color-coded)
 # ----------------------------------------------------------
 st.subheader("SUPT 24h Harmonic Phase Memory (ψₛ, EII, αᵣ Drift)")
 
@@ -206,14 +201,16 @@ try:
         eii_smooth = np.interp(xnew, x, merged["eii"])
         alpha_s_smooth = np.interp(xnew, x, merged["alpha_r"])
 
+        # Color map by phase
+        phase_colors = ["#4FC3F7" if e <= 0.35 else "#FFB300" if e <= 0.65 else "#E53935" for e in eii_smooth]
+
         fig4 = go.Figure()
         fig4.add_trace(go.Scatter3d(
             x=psi_s_smooth, y=eii_smooth, z=alpha_s_smooth,
-            mode='lines', line=dict(color="#FFD54F", width=5),
+            mode='lines', line=dict(color=phase_colors[-1], width=5),
             name='Phase Trajectory (24h)'
         ))
 
-        # Rotation frames
         rotation_frames = []
         for angle in range(0, 360, 3):
             rotation_frames.append(dict(
@@ -227,27 +224,6 @@ try:
             template="plotly_dark",
             margin=dict(l=0, r=0, b=0, t=40),
             title="SUPT Harmonic Drift — ψₛ ↔ EII ↔ αᵣ (24h Memory)",
-            updatemenus=[{
-                "buttons": [
-                    {"args": [None, {"frame": {"duration": 100, "redraw": True},
-                                     "fromcurrent": True, "transition": {"duration": 0}}],
-                     "label": "▶ Play Resonance",
-                     "method": "animate"},
-                    {"args": [[None], {"frame": {"duration": 0, "redraw": False},
-                                       "mode": "immediate",
-                                       "transition": {"duration": 0}}],
-                     "label": "⏸ Pause",
-                     "method": "animate"}
-                ],
-                "direction": "left",
-                "pad": {"r": 10, "t": 20},
-                "showactive": True,
-                "type": "buttons",
-                "x": 0.1,
-                "xanchor": "right",
-                "y": 1.1,
-                "yanchor": "top"
-            }]
         )
         fig4.frames = rotation_frames
         st.plotly_chart(fig4, use_container_width=True)
@@ -262,7 +238,7 @@ except Exception as e:
 st.markdown(
     f"""
     <hr><p style='text-align:center; color:#FBC02D;'>
-    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2.3
+    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2.5
     </p>
     """,
     unsafe_allow_html=True,
