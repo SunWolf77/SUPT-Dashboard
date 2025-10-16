@@ -1,7 +1,7 @@
 # ==========================================================
 # ☀️ SunWolf-SUPT: Solar Gold Forecast Dashboard
 # Real-time coupling between Solar & Geothermal Systems
-# by SUPT / SunWolf Initiative 2025
+# with 3D Auto-Rotating Harmonic Memory
 # ==========================================================
 
 import streamlit as st
@@ -48,7 +48,7 @@ def clock_pulse_html():
     """
 
 # ----------------------------------------------------------
-# Title Header
+# Header
 # ----------------------------------------------------------
 st.markdown(
     """
@@ -63,7 +63,7 @@ with col3:
     st.markdown(clock_pulse_html() + f"<b>🕒 {live_utc()}</b>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------
-# Data Fetching Functions (Cached)
+# Data Fetching
 # ----------------------------------------------------------
 @st.cache_data(ttl=900)
 def fetch_kp_index():
@@ -97,7 +97,6 @@ def fetch_ingv():
     except Exception:
         return pd.DataFrame(columns=["time", "md", "depth"])
 
-# Load all feeds
 kp_df = fetch_kp_index()
 sw_df = fetch_solar_wind()
 eq_df = fetch_ingv()
@@ -105,7 +104,7 @@ eq_df = fetch_ingv()
 st.write(f"**Data Feeds:** NOAA 🟢 | INGV 🟢 | USGS 🟢 | Last Update: {live_utc()}")
 
 # ----------------------------------------------------------
-# SUPT Metric Computation
+# SUPT Metrics
 # ----------------------------------------------------------
 def compute_metrics(kp_df, sw_df, eq_df):
     kp = kp_df["kp_index"].astype(float).mean() if not kp_df.empty else 0
@@ -133,7 +132,7 @@ col3.metric("αᵣ (Damping)", f"{alpha_r:.3f}")
 col4.metric("RPAM Status", rpam_status)
 
 # ----------------------------------------------------------
-# Solar Gauges
+# Gauges
 # ----------------------------------------------------------
 gauge_col1, gauge_col2 = st.columns(2)
 
@@ -166,7 +165,7 @@ with gauge_col2:
     st.plotly_chart(fig2, use_container_width=True)
 
 # ----------------------------------------------------------
-# Solar-Geophysical Coupling Chart
+# Harmonic Coupling
 # ----------------------------------------------------------
 st.subheader("Solar-Geophysical Coupling (24h Harmonic Trend)")
 if not kp_df.empty:
@@ -188,7 +187,7 @@ if not kp_df.empty:
     st.plotly_chart(fig3, use_container_width=True)
 
 # ----------------------------------------------------------
-# SUPT 24h Harmonic Phase Memory
+# Auto-Rotating 3D Harmonic Memory
 # ----------------------------------------------------------
 st.subheader("SUPT 24h Harmonic Phase Memory (ψₛ, EII, αᵣ Drift)")
 
@@ -213,10 +212,44 @@ try:
             mode='lines', line=dict(color="#FFD54F", width=5),
             name='Phase Trajectory (24h)'
         ))
+
+        # Rotation frames
+        rotation_frames = []
+        for angle in range(0, 360, 3):
+            rotation_frames.append(dict(
+                layout=dict(scene_camera=dict(eye=dict(x=np.cos(np.radians(angle))*1.5,
+                                                       y=np.sin(np.radians(angle))*1.5,
+                                                       z=0.7)))
+            ))
+
         fig4.update_layout(
             scene=dict(xaxis_title="ψₛ", yaxis_title="EII", zaxis_title="αᵣ", bgcolor="black"),
-            template="plotly_dark", title="SUPT Harmonic Drift — ψₛ ↔ EII ↔ αᵣ (24h Memory)"
+            template="plotly_dark",
+            margin=dict(l=0, r=0, b=0, t=40),
+            title="SUPT Harmonic Drift — ψₛ ↔ EII ↔ αᵣ (24h Memory)",
+            updatemenus=[{
+                "buttons": [
+                    {"args": [None, {"frame": {"duration": 100, "redraw": True},
+                                     "fromcurrent": True, "transition": {"duration": 0}}],
+                     "label": "▶ Play Resonance",
+                     "method": "animate"},
+                    {"args": [[None], {"frame": {"duration": 0, "redraw": False},
+                                       "mode": "immediate",
+                                       "transition": {"duration": 0}}],
+                     "label": "⏸ Pause",
+                     "method": "animate"}
+                ],
+                "direction": "left",
+                "pad": {"r": 10, "t": 20},
+                "showactive": True,
+                "type": "buttons",
+                "x": 0.1,
+                "xanchor": "right",
+                "y": 1.1,
+                "yanchor": "top"
+            }]
         )
+        fig4.frames = rotation_frames
         st.plotly_chart(fig4, use_container_width=True)
     else:
         st.warning("Insufficient data for harmonic phase reconstruction.")
@@ -229,7 +262,7 @@ except Exception as e:
 st.markdown(
     f"""
     <hr><p style='text-align:center; color:#FBC02D;'>
-    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2.1
+    Updated {live_utc()} | Feeds: NOAA🟢 INGV🟢 USGS🟢 | Mode: Solar Gold ☀️ | SunWolf-SUPT v2.3
     </p>
     """,
     unsafe_allow_html=True,
