@@ -1,5 +1,5 @@
 # ==========================================================
-# ☀️🐺 SunWolf-SUPT v3.5 — Solar Gold + ψₛ Coupling + INGV Live
+# 🌞🐺 SunWolf-SUPT v3.5 — Solar Gold + ψₛ Coupling + INGV Live
 # Real-time coupling between Solar and Geothermal Systems
 # Powered by SUPT ψ-Fold • NOAA • INGV • USGS
 # ==========================================================
