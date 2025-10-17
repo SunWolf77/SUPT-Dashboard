@@ -61,77 +61,98 @@ def fetch_noaa_kp():
         })
 
 # ---------------- INGV / USGS FETCH ----------------
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def load_seismic_data():
-    """Fetch live INGV or fallback USGS data."""
-    end_time = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-    start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+    """Load seismic data from INGV (live), fallback to USGS if needed, then synthetic continuity if all fail."""
 
     try:
-        # --- INGV primary feed ---
-        url = (
+        # --- Primary INGV Live Fetch (Campi Flegrei window)
+        end_time = dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+        start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
+
+        ingv_url = (
             f"https://webservices.ingv.it/fdsnws/event/1/query?"
             f"starttime={start_time}&endtime={end_time}"
             f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3"
             f"&minmag=0&format=text"
         )
-        r = requests.get(url, timeout=API_TIMEOUT)
-        r.raise_for_status()
-        text_data = r.text.strip()
 
-        if len(text_data) < 80:
-            raise ValueError("INGV returned empty dataset")
+        response = requests.get(ingv_url, timeout=10)
+        response.raise_for_status()
 
-        # Detect delimiter automatically
-        delim = "|" if "|" in text_data.splitlines()[0] else ","
-        df = pd.read_csv(io.StringIO(text_data), delimiter=delim, comment="#")
-        df.columns = [c.lower().strip() for c in df.columns]
+        df_ingv = pd.read_csv(io.StringIO(response.text), delimiter="|", comment="#")
 
-        time_col = next((c for c in df.columns if "time" in c or "date" in c), None)
-        depth_col = next((c for c in df.columns if "depth" in c), None)
-        mag_col = next((c for c in df.columns if "mag" in c and "type" not in c), None)
+        # --- Normalize column names ---
+        df_ingv.columns = [c.strip() for c in df_ingv.columns]
+        cols = df_ingv.columns.tolist()
 
-        if not all([time_col, depth_col, mag_col]):
+        if "Time" not in cols or "Depth/Km" not in cols or "Magnitude" not in cols:
             raise KeyError("INGV columns missing")
 
-        df["time"] = pd.to_datetime(df[time_col], errors="coerce")
-        df["depth_km"] = pd.to_numeric(df[depth_col], errors="coerce")
-        df["magnitude"] = pd.to_numeric(df[mag_col], errors="coerce")
-        df = df.dropna(subset=["time", "depth_km", "magnitude"])
+        df_ingv["time"] = pd.to_datetime(df_ingv["Time"], errors="coerce")
+        df_ingv["magnitude"] = pd.to_numeric(df_ingv["Magnitude"], errors="coerce")
+        df_ingv["depth_km"] = pd.to_numeric(df_ingv["Depth/Km"], errors="coerce")
 
-        if df.empty:
-            raise ValueError("No valid INGV rows")
+        df_ingv = df_ingv.dropna(subset=["time", "magnitude", "depth_km"])
 
-        st.success(f"✅ INGV live feed active ({len(df)} events).")
-        return df
+        # --- Empty dataset check ---
+        if df_ingv.empty:
+            st.info("No Campi Flegrei events; using Italian regional fallback.")
+            fallback_url = (
+                f"https://webservices.ingv.it/fdsnws/event/1/query?"
+                f"starttime={start_time}&endtime={end_time}"
+                f"&minlat=37.0&maxlat=45.0&minlon=10.0&maxlon=16.0"
+                f"&minmag=2&format=text"
+            )
+            response_fb = requests.get(fallback_url, timeout=10)
+            response_fb.raise_for_status()
+            df_ingv = pd.read_csv(io.StringIO(response_fb.text), delimiter="|", comment="#")
+            if "Time" in df_ingv.columns and "Depth/Km" in df_ingv.columns and "Magnitude" in df_ingv.columns:
+                df_ingv["time"] = pd.to_datetime(df_ingv["Time"], errors="coerce")
+                df_ingv["magnitude"] = pd.to_numeric(df_ingv["Magnitude"], errors="coerce")
+                df_ingv["depth_km"] = pd.to_numeric(df_ingv["Depth/Km"], errors="coerce")
+                st.success(f"INGV live feed active ({len(df_ingv)} events).")
+                return df_ingv
+            else:
+                raise KeyError("Fallback region returned non-standard columns")
+
+        st.success(f"INGV live feed active ({len(df_ingv)} events).")
+        return df_ingv
 
     except Exception as e:
         st.warning(f"INGV fetch failed: {e}. Trying USGS fallback...")
 
         try:
-            # --- USGS fallback ---
+            # --- USGS Fallback (7-day, Campi Flegrei window)
             usgs_url = (
                 f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
                 f"format=csv&starttime={start_time}&endtime={end_time}"
                 f"&minlatitude=40.7&maxlatitude=40.9&minlongitude=14.0&maxlongitude=14.3"
             )
-            r2 = requests.get(usgs_url, timeout=API_TIMEOUT)
-            r2.raise_for_status()
-            df_usgs = pd.read_csv(io.StringIO(r2.text))
+            r_usgs = requests.get(usgs_url, timeout=10)
+            r_usgs.raise_for_status()
+            df_usgs = pd.read_csv(io.StringIO(r_usgs.text))
+            if df_usgs.empty:
+                st.warning("USGS fallback feed active (0 events).")
+                raise ValueError("USGS returned empty dataset")
             df_usgs["time"] = pd.to_datetime(df_usgs["time"], errors="coerce")
-            df_usgs["depth_km"] = df_usgs["depth"]
-            df_usgs["magnitude"] = df_usgs["mag"]
-            df_usgs = df_usgs.dropna(subset=["time", "depth_km", "magnitude"])
-
-            if len(df_usgs) == 0:
-                raise ValueError("USGS returned no events")
-
+            df_usgs["magnitude"] = pd.to_numeric(df_usgs["mag"], errors="coerce")
+            df_usgs["depth_km"] = pd.to_numeric(df_usgs["depth"], errors="coerce")
             st.info(f"USGS fallback feed active ({len(df_usgs)} events).")
             return df_usgs
 
-        except Exception:
-            st.error("⚠️ No live seismic data available. Using synthetic continuity dataset.")
-            return generate_synthetic_data()
+        except Exception as e2:
+            st.error(f"No live seismic data available. Using synthetic continuity dataset. ({e2})")
+
+            # --- Synthetic fallback (continuity mode) ---
+            t_now = dt.datetime.utcnow()
+            times = [t_now - dt.timedelta(hours=i) for i in range(24)]
+            df_synth = pd.DataFrame({
+                "time": times[::-1],
+                "magnitude": np.random.uniform(0.5, 1.5, size=24),
+                "depth_km": np.random.uniform(1.0, 3.0, size=24)
+            })
+            return df_synth
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="SUPT Forecast Dashboard", layout="wide")
