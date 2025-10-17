@@ -1,7 +1,7 @@
-# ===============================================================
-# SUPT :: GROK Forecast Dashboard v4.2
-# ψₛ–Depth–Kp Harmonic Drift Analyzer (Stable Continuum Build)
-# ===============================================================
+# ================================================================
+# SUPT :: GROK Forecast Dashboard v4.5-Final
+# Core Functional Build — No SciPy, No Patch Dependencies
+# ================================================================
 
 import streamlit as st
 import pandas as pd
@@ -9,25 +9,23 @@ import numpy as np
 import requests
 import datetime as dt
 import io
-import csv
 import plotly.graph_objects as go
+import csv
 
-# -------------------------- CONFIG -----------------------------
+# ---------------- CONFIG ----------------
 API_TIMEOUT = 10
-NOAA_GEOMAG_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-DEFAULT_SOLAR = {"psi_s": 0.72}
+NOAA_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 LOCAL_FALLBACK_CSV = "events_6.csv"
+DEFAULT_PSI = 0.72
 
-# ===============================================================
-# CORE FUNCTIONS
-# ===============================================================
+# ---------------- UTILITIES ----------------
 def compute_eii(md_max, md_mean, shallow_ratio, psi_s):
     return np.clip((md_max * 0.2 + md_mean * 0.15 + shallow_ratio * 0.4 + psi_s * 0.25), 0, 1)
 
 def classify_phase(EII):
     if EII >= 0.85: return "ACTIVE – Collapse Window Initiated"
     elif EII >= 0.6: return "ELEVATED – Pressure Coupling Phase"
-    return "MONITORING"
+    else: return "MONITORING"
 
 def generate_synthetic_seismic_data(n=24):
     now = dt.datetime.utcnow()
@@ -37,25 +35,11 @@ def generate_synthetic_seismic_data(n=24):
         "depth_km": np.random.uniform(0.8, 3.0, n)
     })
 
-# ===============================================================
-# INTERNAL CROSS-CORRELATION (No SciPy)
-# ===============================================================
-def np_correlate_phase(ref, target):
-    ref = (ref - np.mean(ref)) / np.std(ref)
-    target = (target - np.mean(target)) / np.std(target)
-    corr = np.correlate(target, ref, mode="full")
-    lag = np.arange(-len(ref) + 1, len(ref))
-    best_lag = lag[np.argmax(corr)]
-    corr_norm = np.max(corr) / len(ref)
-    return best_lag, corr_norm
-
-# ===============================================================
-# NOAA FETCH
-# ===============================================================
+# ---------------- NOAA FETCH ----------------
 @st.cache_data(ttl=600)
-def fetch_geomag_data():
+def fetch_noaa_kp():
     try:
-        r = requests.get(NOAA_GEOMAG_URL, timeout=API_TIMEOUT)
+        r = requests.get(NOAA_KP_URL, timeout=API_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         df = pd.DataFrame(data[1:], columns=data[0])
@@ -67,72 +51,84 @@ def fetch_geomag_data():
         now = dt.datetime.utcnow()
         return pd.DataFrame({
             "time_tag": [now - dt.timedelta(hours=i) for i in range(48)],
-            "Kp": np.random.uniform(0.5, 4.0, 48)
+            "Kp": np.random.uniform(1, 5, 48)
         })
 
-# ===============================================================
-# INGV FETCH (with adaptive column repair)
-# ===============================================================
+# ---------------- INGV / USGS FETCH ----------------
 @st.cache_data(show_spinner=False)
 def load_seismic_data():
+    end_time = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+
     try:
-        end_time = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-        start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+        # INGV primary feed
         url = (f"https://webservices.ingv.it/fdsnws/event/1/query?"
                f"starttime={start_time}&endtime={end_time}"
-               f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3&minmag=0&format=text")
+               f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3"
+               f"&minmag=0&format=text")
         r = requests.get(url, timeout=API_TIMEOUT)
         r.raise_for_status()
-
         text_data = r.text.strip()
-        if len(text_data) < 50:
+
+        if len(text_data) < 80:
             raise ValueError("INGV returned empty dataset")
 
         # Detect delimiter automatically
-        dialect = csv.Sniffer().sniff(text_data.splitlines()[1])
-        delim = dialect.delimiter if dialect.delimiter in ["|", ",", ";", "\t"] else "|"
+        first_line = text_data.splitlines()[0]
+        delim = "|" if "|" in first_line else "," if "," in first_line else "\t"
+
         df = pd.read_csv(io.StringIO(text_data), delimiter=delim, comment="#")
-        df.columns = [c.lower().replace("(", "").replace(")", "").replace("/", "").strip() for c in df.columns]
+        df.columns = [c.lower().strip().replace("/", "").replace("(", "").replace(")", "") for c in df.columns]
 
-        t = next((c for c in df.columns if "time" in c), None)
-        d = next((c for c in df.columns if "depth" in c), None)
-        m = next((c for c in df.columns if "mag" in c), None)
-        if not all([t, d, m]):
-            raise KeyError("INGV essential columns missing")
+        time_col = next((c for c in df.columns if "time" in c or "date" in c), None)
+        depth_col = next((c for c in df.columns if "depth" in c), None)
+        mag_col = next((c for c in df.columns if "mag" in c and "type" not in c), None)
 
-        df["time"] = pd.to_datetime(df[t], errors="coerce")
-        df["depth_km"] = pd.to_numeric(df[d], errors="coerce")
-        df["magnitude"] = pd.to_numeric(df[m], errors="coerce")
+        if not all([time_col, depth_col, mag_col]):
+            raise KeyError("INGV columns missing")
+
+        df["time"] = pd.to_datetime(df[time_col], errors="coerce")
+        df["depth_km"] = pd.to_numeric(df[depth_col], errors="coerce")
+        df["magnitude"] = pd.to_numeric(df[mag_col], errors="coerce")
         df = df.dropna(subset=["time", "depth_km", "magnitude"])
-        if df.empty: raise ValueError("INGV returned no valid rows")
-        st.info("✅ INGV live feed active.")
+
+        if df.empty:
+            raise ValueError("INGV returned no valid rows")
+
+        st.success(f"✅ INGV live feed active ({len(df)} events)")
         return df
 
     except Exception as e:
-        st.warning(f"INGV fetch failed: {e} — using synthetic continuity data.")
-        return generate_synthetic_seismic_data()
+        st.warning(f"INGV fetch failed: {e}. Trying USGS fallback...")
+        try:
+            # USGS fallback
+            usgs_url = (f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
+                        f"format=csv&starttime={start_time}&endtime={end_time}"
+                        f"&minlatitude=40.7&maxlatitude=40.9&minlongitude=14.0&maxlongitude=14.3")
+            usgs = requests.get(usgs_url, timeout=API_TIMEOUT)
+            usgs.raise_for_status()
+            df_usgs = pd.read_csv(io.StringIO(usgs.text))
+            df_usgs["time"] = pd.to_datetime(df_usgs["time"], errors="coerce")
+            df_usgs["depth_km"] = df_usgs["depth"]
+            df_usgs["magnitude"] = df_usgs["mag"]
+            st.info(f"USGS fallback feed active ({len(df_usgs)} events).")
+            return df_usgs[["time", "depth_km", "magnitude"]].dropna()
+        except Exception:
+            st.warning("All live feeds unavailable — using synthetic continuity dataset.")
+            return generate_synthetic_seismic_data()
 
-# ===============================================================
-# GENERATORS
-# ===============================================================
-def generate_forecast_wave(psi_s):
-    hours = np.arange(0, 48)
-    base = psi_s + 0.03 * np.sin(hours / 5) + 0.015 * np.cos(hours / 8)
-    noise = np.random.uniform(-0.01, 0.01, len(hours))
-    return pd.DataFrame({"hour": hours, "forecast_psi": np.clip(base + noise, 0, 1)})
-
-# ===============================================================
-# STREAMLIT DASHBOARD
-# ===============================================================
-st.set_page_config(page_title="SUPT :: GROK Forecast Dashboard", layout="wide")
+# ---------------- STREAMLIT UI ----------------
+st.set_page_config(page_title="SUPT Forecast Dashboard", layout="wide")
 st.title("🌋 SUPT :: GROK Forecast Dashboard")
-st.caption("v4.2 — ψₛ Harmonic Drift Analyzer (Stable Continuum Build)")
+st.caption("v4.5 — Core Functional Build (Live INGV, NOAA, USGS Fallback)")
 
-with st.spinner("Loading feeds..."):
+with st.spinner("Fetching data feeds..."):
     df = load_seismic_data()
-    kp_df = fetch_geomag_data()
+    kp_df = fetch_noaa_kp()
 
-psi_s = st.sidebar.slider("Solar Pressure Proxy (ψₛ)", 0.0, 1.0, DEFAULT_SOLAR["psi_s"])
+psi_s = st.sidebar.slider("Solar Pressure Proxy (ψₛ)", 0.0, 1.0, DEFAULT_PSI)
+
+# Core Calculations
 EII = compute_eii(df["magnitude"].max(), df["magnitude"].mean(),
                   len(df[df["depth_km"] < 2.5]) / max(len(df), 1), psi_s)
 RPAM = classify_phase(EII)
@@ -141,42 +137,21 @@ col1, col2 = st.columns(2)
 col1.metric("EII", f"{EII:.3f}")
 col2.metric("RPAM", RPAM)
 
-# ===============================================================
-# WAVE CREATION + NORMALIZATION
-# ===============================================================
-solar_wave = generate_forecast_wave(psi_s)["forecast_psi"]
-depth_wave = (df["depth_km"].rolling(3, min_periods=1).mean().iloc[:48] - df["depth_km"].min()) / (df["depth_km"].max() - df["depth_km"].min())
-kp_wave = (kp_df["Kp"].iloc[-48:].reset_index(drop=True) - kp_df["Kp"].min()) / (kp_df["Kp"].max() - kp_df["Kp"].min())
-
-# ===============================================================
-# PHASE-LAG ANALYSIS
-# ===============================================================
-lag_pd, corr_pd = np_correlate_phase(solar_wave, depth_wave)
-lag_pk, corr_pk = np_correlate_phase(solar_wave, kp_wave)
-lag_kd, corr_kd = np_correlate_phase(kp_wave, depth_wave)
-
-st.subheader("⏱️ Harmonic Phase Drift (Δφ)")
-st.write(f"**ψₛ → Depth Lag:** {lag_pd:+d} h  | Corr = {corr_pd:.2f}")
-st.write(f"**ψₛ → Kp Lag:** {lag_pk:+d} h  | Corr = {corr_pk:.2f}")
-st.write(f"**Kp → Depth Lag:** {lag_kd:+d} h  | Corr = {corr_kd:.2f}")
-
-# ===============================================================
-# VISUALIZATION
-# ===============================================================
+# Simple 24h harmonic drift
+df_plot = df.sort_values("time").tail(24)
 fig = go.Figure()
-fig.add_trace(go.Scatter(y=solar_wave, mode="lines", name="ψₛ Solar", line=dict(color="#FFA726", width=3)))
-fig.add_trace(go.Scatter(y=kp_wave, mode="lines", name="Kp Geomagnetic", line=dict(color="#42A5F5", width=2)))
-fig.add_trace(go.Scatter(y=depth_wave, mode="lines", name="Depth (norm)", line=dict(color="#8BC34A", width=2)))
-fig.update_layout(
-    title="ψₛ Harmonic Drift Analyzer — ψₛ, Kp, Depth Phase Alignment (48h)",
-    xaxis_title="Time (hours)",
-    yaxis_title="Normalized Amplitude",
-    template="plotly_white"
-)
+fig.add_trace(go.Scatter(x=df_plot["time"], y=df_plot["depth_km"],
+                         mode="lines+markers", name="Depth (km)", line=dict(color="#FFA726")))
+fig.add_trace(go.Scatter(x=df_plot["time"], y=df_plot["magnitude"],
+                         mode="lines+markers", name="Magnitude", line=dict(color="#42A5F5")))
+fig.update_layout(title="24h Harmonic Drift — Depth vs Magnitude",
+                  xaxis_title="Time (UTC)", yaxis_title="Value", template="plotly_white")
 st.plotly_chart(fig, use_container_width=True)
 
-# ===============================================================
-# FOOTER
-# ===============================================================
-st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | SUPT v4.2 Continuum Engine")
-st.caption("Powered by Sheppard’s Universal Proxy Theory — ψₛ↔Depth↔Kp Phase Synchronization & Drift Mapping.")
+# NOAA Kp
+latest_kp = kp_df["Kp"].iloc[-1] if not kp_df.empty else 0
+st.metric("Current Geomagnetic Kp", f"{latest_kp:.1f}")
+
+# Footer
+st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}")
+st.caption("Powered by SUPT — Sheppard’s Universal Proxy Theory (Functional Core)")
