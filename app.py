@@ -1,5 +1,5 @@
 # ===============================================================
-#  SUPT :: GROK Forecast Dashboard (SunWolf Coupled Edition) v3.8f
+#  SUPT :: GROK Forecast Dashboard (SunWolf Resilient Build) v3.8g
 #  Campi Flegrei + Solar ψₛ–Depth Harmonic Coherence System
 # ===============================================================
 
@@ -48,6 +48,16 @@ def classify_phase(EII):
         return "MONITORING"
 
 
+def generate_synthetic_seismic_data():
+    """Creates stable fallback if live APIs fail."""
+    now = dt.datetime.utcnow()
+    times = [now - dt.timedelta(hours=i * 6) for i in range(28)]
+    magnitudes = np.random.uniform(0.5, 1.3, len(times))
+    depths = np.random.uniform(0.8, 3.0, len(times))
+    df = pd.DataFrame({"time": times, "magnitude": magnitudes, "depth_km": depths})
+    return df
+
+
 @st.cache_data(ttl=600)
 def fetch_geomag_data():
     """NOAA Kp geomagnetic data"""
@@ -68,7 +78,7 @@ def fetch_geomag_data():
 
 @st.cache_data(show_spinner=False)
 def load_seismic_data():
-    """Load INGV → USGS → Synthetic fallback"""
+    """Load INGV → USGS → Local CSV → Synthetic fallback"""
     try:
         end_time = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -79,14 +89,25 @@ def load_seismic_data():
         r = requests.get(ingv_url, timeout=API_TIMEOUT)
         r.raise_for_status()
         df_ingv = pd.read_csv(io.StringIO(r.text), delimiter="|", comment="#")
-        if "Time" not in df_ingv.columns or "Depth/Km" not in df_ingv.columns:
+
+        if not any("Time" in c for c in df_ingv.columns):
             raise KeyError("INGV format inconsistent")
-        df_ingv["time"] = pd.to_datetime(df_ingv["Time"])
-        df_ingv["magnitude"] = df_ingv["Magnitude"]
-        df_ingv["depth_km"] = df_ingv["Depth/Km"]
+
+        # Normalize column names dynamically
+        df_ingv.columns = [c.strip().replace(" ", "").replace("(", "").replace(")", "") for c in df_ingv.columns]
+        time_col = [c for c in df_ingv.columns if "Time" in c][0]
+        mag_col = [c for c in df_ingv.columns if "Mag" in c][0]
+        depth_col = [c for c in df_ingv.columns if "Depth" in c][0]
+
+        df_ingv["time"] = pd.to_datetime(df_ingv[time_col])
+        df_ingv["magnitude"] = df_ingv[mag_col]
+        df_ingv["depth_km"] = df_ingv[depth_col]
         return df_ingv[df_ingv["time"] > dt.datetime.utcnow() - dt.timedelta(days=7)]
+
     except Exception as e:
         st.warning(f"INGV fetch failed: {e}. Trying USGS fallback...")
+
+        # USGS fallback
         try:
             usgs_url = (
                 f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
@@ -100,14 +121,19 @@ def load_seismic_data():
             df_usgs["magnitude"] = df_usgs["mag"]
             df_usgs["depth_km"] = df_usgs["depth"]
             return df_usgs[df_usgs["time"] > dt.datetime.utcnow() - dt.timedelta(days=7)]
+
         except Exception as e:
-            st.warning(f"USGS fallback failed: {e}. Using synthetic dataset for continuity.")
-            df = pd.DataFrame({
-                "time": pd.date_range(dt.datetime.utcnow() - dt.timedelta(days=7), periods=12, freq="12H"),
-                "magnitude": np.random.uniform(0.5, 1.2, 12),
-                "depth_km": np.random.uniform(0.8, 3.2, 12),
-            })
-            return df
+            st.warning(f"USGS fallback failed: {e}. Trying local CSV fallback...")
+
+            # Local CSV fallback
+            try:
+                df_local = pd.read_csv(LOCAL_FALLBACK_CSV)
+                df_local["time"] = pd.to_datetime(df_local["time"])
+                st.info("Loaded local fallback dataset.")
+                return df_local
+            except Exception:
+                st.warning("Local CSV not found — using synthetic dataset.")
+                return generate_synthetic_seismic_data()
 
 
 def generate_solar_history(psi_s):
@@ -119,14 +145,15 @@ def generate_solar_history(psi_s):
 # ---------------- LAYOUT ---------------- #
 st.set_page_config(page_title="SUPT :: GROK Forecast Dashboard", layout="wide")
 st.title("🌋 SUPT :: GROK Forecast Dashboard")
-st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v3.8f (Functional Build)")
+st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v3.8g (Resilient Build)")
 
 with st.spinner("Loading seismic dataset..."):
     df = load_seismic_data()
 
 if df.empty:
     st.error("No seismic data loaded — check live feed or fallback.")
-    st.stop()
+    df = generate_synthetic_seismic_data()
+    st.info("Synthetic continuity mode activated.")
 
 geomag_data = fetch_geomag_data()
 
@@ -218,5 +245,5 @@ fig3.update_layout(
 st.plotly_chart(fig3, use_container_width=True)
 
 # ---------------- FOOTER ---------------- #
-st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • INGV • USGS | Mode: SunWolf Harmonics | SUPT v3.8f")
+st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • INGV • USGS | Mode: SunWolf Harmonics | SUPT v3.8g")
 st.caption("Powered by Sheppard’s Universal Proxy Theory — Real-time ψₛ–Depth Energy Coupling Monitor.")
