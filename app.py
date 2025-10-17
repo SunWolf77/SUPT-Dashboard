@@ -1,5 +1,5 @@
 # ===============================================================
-#  SUPT :: GROK Forecast Dashboard (SunWolf Coupled Edition) v3.8
+#  SUPT :: GROK Forecast Dashboard (SunWolf Coupled Edition) v3.8f
 #  Campi Flegrei + Solar ψₛ–Depth Harmonic Coherence System
 # ===============================================================
 
@@ -10,7 +10,6 @@ import requests
 import datetime as dt
 import io
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ---------------- #
 API_TIMEOUT = 10
@@ -25,7 +24,7 @@ DEFAULT_SOLAR = {
     "solar_speed": 688,
 }
 
-# ---------------- STATE ---------------- #
+# ---------------- SESSION STATE ---------------- #
 if "cci" not in st.session_state:
     st.session_state.cci = 0.0
 if "psi_hist" not in st.session_state:
@@ -35,10 +34,12 @@ if "depth_signal" not in st.session_state:
 
 # ---------------- FUNCTIONS ---------------- #
 def compute_eii(md_max, md_mean, shallow_ratio, psi_s):
+    """Energetic Instability Index"""
     return np.clip((md_max * 0.2 + md_mean * 0.15 + shallow_ratio * 0.4 + psi_s * 0.25), 0, 1)
 
 
 def classify_phase(EII):
+    """SUPT Phase Classification"""
     if EII >= 0.85:
         return "ACTIVE – Collapse Window Initiated"
     elif EII >= 0.6:
@@ -49,6 +50,7 @@ def classify_phase(EII):
 
 @st.cache_data(ttl=600)
 def fetch_geomag_data():
+    """NOAA Kp geomagnetic data"""
     try:
         response = requests.get(NOAA_GEOMAG_URL, timeout=API_TIMEOUT)
         response.raise_for_status()
@@ -66,6 +68,7 @@ def fetch_geomag_data():
 
 @st.cache_data(show_spinner=False)
 def load_seismic_data():
+    """Load INGV → USGS → Synthetic fallback"""
     try:
         end_time = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -76,9 +79,8 @@ def load_seismic_data():
         r = requests.get(ingv_url, timeout=API_TIMEOUT)
         r.raise_for_status()
         df_ingv = pd.read_csv(io.StringIO(r.text), delimiter="|", comment="#")
-        cols = [c.strip() for c in df_ingv.columns]
-        if "Time" not in cols and len(cols) > 1:
-            raise KeyError("INGV columns not standardized")
+        if "Time" not in df_ingv.columns or "Depth/Km" not in df_ingv.columns:
+            raise KeyError("INGV format inconsistent")
         df_ingv["time"] = pd.to_datetime(df_ingv["Time"])
         df_ingv["magnitude"] = df_ingv["Magnitude"]
         df_ingv["depth_km"] = df_ingv["Depth/Km"]
@@ -113,10 +115,11 @@ def generate_solar_history(psi_s):
     drift = psi_s + 0.02 * np.sin(hours / 3) + np.random.uniform(-0.005, 0.005, len(hours))
     return pd.DataFrame({"hour": hours, "psi_s": np.clip(drift, 0, 1)})
 
+
 # ---------------- LAYOUT ---------------- #
 st.set_page_config(page_title="SUPT :: GROK Forecast Dashboard", layout="wide")
 st.title("🌋 SUPT :: GROK Forecast Dashboard")
-st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v3.8 SunWolf Edition")
+st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v3.8f (Functional Build)")
 
 with st.spinner("Loading seismic dataset..."):
     df = load_seismic_data()
@@ -149,25 +152,18 @@ col2.metric("RPAM", RPAM_STATUS)
 col3.metric("ψₛ", f"{psi_s:.3f}")
 col4.metric("Geomagnetic Kp", f"{geomag_data['kp_index']:.1f}")
 
-# ---------------- LIVE COHERENCE GAUGE ---------------- #
+# ---------------- LIVE COHERENCE ---------------- #
 st.markdown("### ☯ SUPT Coupling Coherence Index (CCI) — Live Tracking")
 
-if not df.empty:
-    depth_signal = np.interp(
-        np.linspace(0, len(df) - 1, 24),
-        np.arange(len(df)),
-        np.clip(df["depth_km"].rolling(window=3, min_periods=1).mean().values, 0, 5),
-    )
-else:
-    depth_signal = np.random.uniform(0.5, 3.0, 24)
-
+depth_signal = np.interp(
+    np.linspace(0, len(df) - 1, 24),
+    np.arange(len(df)),
+    np.clip(df["depth_km"].rolling(window=3, min_periods=1).mean().values, 0, 5),
+)
 hist = generate_solar_history(psi_s)
 psi_norm = (hist["psi_s"] - np.mean(hist["psi_s"])) / np.std(hist["psi_s"])
 depth_norm = (depth_signal - np.mean(depth_signal)) / np.std(depth_signal)
 cci = np.corrcoef(psi_norm, depth_norm)[0, 1] ** 2
-st.session_state.cci = cci
-st.session_state.psi_hist = hist["psi_s"].tolist()
-st.session_state.depth_signal = depth_signal.tolist()
 
 color = "green" if cci >= 0.7 else "orange" if cci >= 0.4 else "red"
 label = "Coherent" if cci >= 0.7 else "Moderate" if cci >= 0.4 else "Decoupled"
@@ -192,9 +188,8 @@ gauge = go.Figure(
 gauge.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=0))
 st.plotly_chart(gauge, use_container_width=True)
 
-# ---------------- HARMONIC PLOTS ---------------- #
-st.markdown("### ψₛ Harmonic Drift & Coupling")
-
+# ---------------- HARMONIC DRIFT ---------------- #
+st.markdown("### ψₛ Harmonic Drift — 24-Hour Trend")
 fig2 = go.Figure()
 fig2.add_trace(
     go.Scatter(x=hist["hour"], y=hist["psi_s"], mode="lines", line=dict(color="#FF9800", width=3))
@@ -210,7 +205,6 @@ st.plotly_chart(fig2, use_container_width=True)
 # ---------------- ψₛ–DEPTH COUPLING ---------------- #
 st.markdown("### ψₛ–Depth Coupling Trend (SUPT Coherence Field)")
 depth_norm = (depth_signal - np.mean(depth_signal)) / np.std(depth_signal)
-
 fig3 = go.Figure()
 fig3.add_trace(go.Scatter(x=hist["hour"], y=hist["psi_s"], mode="lines+markers", name="ψₛ", line=dict(color="#FFD54F", width=3)))
 fig3.add_trace(go.Scatter(x=hist["hour"], y=depth_norm / 2 + 0.5, mode="lines+markers", name="Depth Response", line=dict(color="#42A5F5", width=2, dash="dot")))
@@ -224,5 +218,5 @@ fig3.update_layout(
 st.plotly_chart(fig3, use_container_width=True)
 
 # ---------------- FOOTER ---------------- #
-st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • INGV • USGS | Mode: SunWolf Harmonics | SUPT v3.8")
+st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • INGV • USGS | Mode: SunWolf Harmonics | SUPT v3.8f")
 st.caption("Powered by Sheppard’s Universal Proxy Theory — Real-time ψₛ–Depth Energy Coupling Monitor.")
