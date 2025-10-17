@@ -1,5 +1,5 @@
 # ===============================================================
-# SUPT :: GROK Forecast Dashboard (Stabilized Continuum Build) v3.9.2
+# SUPT :: GROK Forecast Dashboard (Live Continuum Stable Build) v3.9.5
 # ===============================================================
 
 import streamlit as st
@@ -33,15 +33,15 @@ def classify_phase(EII):
         return "ELEVATED – Pressure Coupling Phase"
     return "MONITORING"
 
-def generate_synthetic_seismic_data():
+def generate_synthetic_seismic_data(n=20):
     now = dt.datetime.utcnow()
-    times = [now - dt.timedelta(hours=i * 6) for i in range(28)]
-    mags = np.random.uniform(0.5, 1.3, len(times))
-    depths = np.random.uniform(0.8, 3.0, len(times))
+    times = [now - dt.timedelta(hours=i * 3) for i in range(n)]
+    mags = np.random.uniform(0.5, 1.3, n)
+    depths = np.random.uniform(0.8, 3.0, n)
     return pd.DataFrame({"time": times, "magnitude": mags, "depth_km": depths})
 
 # ===============================================================
-# Fetch NOAA
+# NOAA Fetch
 # ===============================================================
 @st.cache_data(ttl=600)
 def fetch_geomag_data():
@@ -60,79 +60,75 @@ def fetch_geomag_data():
         return {"kp_index": 0.0, "time_tag": "Fallback", "geomag_alert": "LOW"}
 
 # ===============================================================
-# Load Seismic Data (INGV > USGS > Local > Synthetic)
+# Load Seismic Data (Adaptive Parser)
 # ===============================================================
 @st.cache_data(show_spinner=False)
 def load_seismic_data(uploaded_file=None):
-    try:
-        # --- Manual Upload ---
-        if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
-            df["time"] = pd.to_datetime(df["time"])
-            st.success("Manual CSV uploaded successfully.")
-            return df
+    def standardize_columns(df):
+        df.columns = [c.strip().lower().replace("(", "").replace(")", "").replace("/", "") for c in df.columns]
+        t = next((c for c in df.columns if "time" in c), None)
+        m = next((c for c in df.columns if "mag" in c), None)
+        d = next((c for c in df.columns if "depth" in c), None)
+        if not all([t, m, d]):
+            raise KeyError("Essential INGV columns missing after normalization.")
+        df["time"] = pd.to_datetime(df[t], errors="coerce")
+        df["magnitude"] = pd.to_numeric(df[m], errors="coerce")
+        df["depth_km"] = pd.to_numeric(df[d], errors="coerce")
+        df = df.dropna(subset=["time", "magnitude", "depth_km"])
+        return df
 
-        # --- INGV Fetch ---
+    try:
+        if uploaded_file is not None:
+            df_manual = pd.read_csv(uploaded_file)
+            st.success("Manual CSV uploaded successfully.")
+            return standardize_columns(df_manual)
+
         end_time = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
         start_time = (dt.datetime.utcnow() - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
-        url = (f"https://webservices.ingv.it/fdsnws/event/1/query?"
-               f"starttime={start_time}&endtime={end_time}"
-               f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3&minmag=0&format=text")
-
-        r = requests.get(url, timeout=API_TIMEOUT)
+        ingv_url = (
+            f"https://webservices.ingv.it/fdsnws/event/1/query?"
+            f"starttime={start_time}&endtime={end_time}"
+            f"&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3&minmag=0&format=text"
+        )
+        r = requests.get(ingv_url, timeout=API_TIMEOUT)
         r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text), delimiter="|", comment="#")
-
-        # --- Robust Column Detection ---
-        lower_cols = [c.lower().strip() for c in df.columns]
-        time_col = next((c for c in df.columns if "time" in c.lower()), None)
-        mag_col = next((c for c in df.columns if "mag" in c.lower()), None)
-        depth_col = next((c for c in df.columns if "depth" in c.lower()), None)
-
-        if not (time_col and mag_col and depth_col):
-            raise KeyError("INGV columns not standardized")
-
-        df["time"] = pd.to_datetime(df[time_col])
-        df["magnitude"] = df[mag_col]
-        df["depth_km"] = df[depth_col]
-        st.info("INGV live feed active.")
-        return df[df["time"] > dt.datetime.utcnow() - dt.timedelta(days=7)]
+        df_ingv = pd.read_csv(io.StringIO(r.text), delimiter="|", comment="#")
+        df_ingv = standardize_columns(df_ingv)
+        st.info("✅ INGV live feed active.")
+        return df_ingv
 
     except Exception as e:
         st.warning(f"INGV fetch failed: {e}. Trying USGS fallback...")
         st.text(traceback.format_exc())
-
         try:
-            # --- USGS Fallback ---
-            usgs_url = (f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
-                        f"format=csv&starttime={start_time}&endtime={end_time}"
-                        f"&minlatitude=40.7&maxlatitude=40.9&minlongitude=14.0&maxlongitude=14.3")
+            usgs_url = (
+                f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
+                f"format=csv&starttime={start_time}&endtime={end_time}"
+                f"&minlatitude=40.7&maxlatitude=40.9&minlongitude=14.0&maxlongitude=14.3"
+            )
             r = requests.get(usgs_url, timeout=API_TIMEOUT)
             r.raise_for_status()
             df_usgs = pd.read_csv(io.StringIO(r.text))
-
-            if not all(x in df_usgs.columns for x in ["time", "mag", "depth"]):
+            df_usgs.columns = [c.lower() for c in df_usgs.columns]
+            if "time" not in df_usgs or "mag" not in df_usgs or "depth" not in df_usgs:
                 raise KeyError("USGS columns missing")
-
-            df_usgs["time"] = pd.to_datetime(df_usgs["time"])
+            df_usgs["time"] = pd.to_datetime(df_usgs["time"], errors="coerce")
             df_usgs["magnitude"] = df_usgs["mag"]
             df_usgs["depth_km"] = df_usgs["depth"]
-            st.info("USGS fallback feed active.")
-            return df_usgs[df_usgs["time"] > dt.datetime.utcnow() - dt.timedelta(days=7)]
-
+            st.info("🛰️ USGS fallback feed active.")
+            return df_usgs.dropna(subset=["time", "magnitude", "depth_km"])
         except Exception as e:
-            st.warning(f"USGS fallback failed: {e}. Checking local CSV...")
+            st.warning(f"USGS fallback failed: {e}")
             try:
                 df_local = pd.read_csv(LOCAL_FALLBACK_CSV)
-                df_local["time"] = pd.to_datetime(df_local["time"])
-                st.info("Loaded local fallback CSV.")
-                return df_local
+                st.info("Loaded local CSV fallback.")
+                return standardize_columns(df_local)
             except Exception:
-                st.error("All sources failed — using synthetic dataset.")
+                st.error("All feeds unavailable — using synthetic continuity dataset.")
                 return generate_synthetic_seismic_data()
 
 # ===============================================================
-# Harmonic Functions
+# Harmonic + Forecast
 # ===============================================================
 def generate_solar_history(psi_s):
     hours = np.arange(0, 24)
@@ -146,59 +142,46 @@ def generate_forecast_wave(psi_s):
     return pd.DataFrame({"hour": hours, "forecast_psi": np.clip(base + noise, 0, 1)})
 
 # ===============================================================
-# UI SETUP
+# UI + Logic
 # ===============================================================
 st.set_page_config(page_title="SUPT :: GROK Forecast Dashboard", layout="wide")
 st.title("🌋 SUPT :: GROK Forecast Dashboard")
-st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v3.9.2 Stabilized Continuum Build")
+st.caption("Campi Flegrei Risk & Energetic Instability Monitor :: v3.9.5 Live Continuum Stable Build")
 
 uploaded_file = st.sidebar.file_uploader("Optional: Upload custom seismic CSV")
 
 with st.spinner("Loading seismic data..."):
     df = load_seismic_data(uploaded_file)
 
-geomag_data = fetch_geomag_data()
-
-# ===============================================================
-# SAFETY CHECKS
-# ===============================================================
 if df.empty:
-    st.error("No data available. Loading synthetic fallback...")
+    st.error("No valid seismic data found — using synthetic continuity data.")
     df = generate_synthetic_seismic_data()
 
-# Handle division by zero safely
-if len(df) == 0:
-    shallow_ratio, md_mean, md_max = 0, 0, 0
-else:
-    shallow_ratio = len(df[df["depth_km"] < 2.5]) / max(len(df), 1)
-    md_mean = df["magnitude"].mean()
-    md_max = df["magnitude"].max()
+geomag = fetch_geomag_data()
 
-# ===============================================================
 # METRICS
-# ===============================================================
 psi_s = st.sidebar.slider("Solar Pressure Proxy (ψₛ)", 0.0, 1.0, DEFAULT_SOLAR["psi_s"])
+md_max = df["magnitude"].max() if not df.empty else 0
+md_mean = df["magnitude"].mean() if not df.empty else 0
+depth_mean = df["depth_km"].mean() if not df.empty else 0
+shallow_ratio = len(df[df["depth_km"] < 2.5]) / max(len(df), 1)
+
 EII = compute_eii(md_max, md_mean, shallow_ratio, psi_s)
-RPAM_STATUS = classify_phase(EII)
+RPAM = classify_phase(EII)
 
 col1, col2, col3 = st.columns(3)
 col1.metric("EII", f"{EII:.3f}")
-col2.metric("RPAM", RPAM_STATUS)
-col3.metric("ψₛ", f"{psi_s:.3f}")
+col2.metric("RPAM", RPAM)
+col3.metric("Geomagnetic Kp", f"{geomag['kp_index']:.1f}")
 
-# ===============================================================
-# ψₛ HARMONIC DRIFT
-# ===============================================================
+# COHERENCE GAUGE
 hist = generate_solar_history(psi_s)
 depth_signal = np.interp(np.linspace(0, len(df) - 1, 24), np.arange(len(df)),
-                         np.clip(df["depth_km"].rolling(window=3, min_periods=1).mean().values, 0, 5))
+                         np.clip(df["depth_km"].rolling(3, min_periods=1).mean(), 0, 5))
 psi_norm = (hist["psi_s"] - np.mean(hist["psi_s"])) / np.std(hist["psi_s"])
 depth_norm = (depth_signal - np.mean(depth_signal)) / np.std(depth_signal)
 cci = np.corrcoef(psi_norm, depth_norm)[0, 1] ** 2 if len(df) > 1 else 0
 
-# ===============================================================
-# GAUGE
-# ===============================================================
 color = "green" if cci >= 0.7 else "orange" if cci >= 0.4 else "red"
 label = "Coherent" if cci >= 0.7 else "Moderate" if cci >= 0.4 else "Decoupled"
 
@@ -211,21 +194,16 @@ gauge = go.Figure(go.Indicator(mode="gauge+number",
                      {"range": [0.7, 1.0], "color": "#C8E6C9"}]}))
 st.plotly_chart(gauge, use_container_width=True)
 
-# ===============================================================
-# ψₛ FORECAST
-# ===============================================================
+# FORECAST CHART
 st.markdown("### 🔮 ψₛ Temporal Resonance Forecast (Next 48 Hours)")
 forecast = generate_forecast_wave(psi_s)
-fig_fore = go.Figure()
-fig_fore.add_trace(go.Scatter(x=forecast["hour"], y=forecast["forecast_psi"],
-                              mode="lines", line=dict(color="#FFB300", width=3)))
-fig_fore.update_layout(title="48-Hour ψₛ Temporal Wave Forecast",
-                       xaxis_title="Hours Ahead", yaxis_title="ψₛ Index",
-                       template="plotly_white")
-st.plotly_chart(fig_fore, use_container_width=True)
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=forecast["hour"], y=forecast["forecast_psi"],
+                         mode="lines", line=dict(color="#FFB300", width=3)))
+fig.update_layout(title="48-Hour ψₛ Temporal Wave Forecast",
+                  xaxis_title="Hours Ahead", yaxis_title="ψₛ Index",
+                  template="plotly_white")
+st.plotly_chart(fig, use_container_width=True)
 
-# ===============================================================
-# FOOTER
-# ===============================================================
-st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • INGV • USGS | SUPT v3.9.2")
-st.caption("Powered by Sheppard’s Universal Proxy Theory — Real-time ψₛ–Depth Coherence + Temporal Resonance Forecast.")
+st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • INGV • USGS | SUPT v3.9.5")
+st.caption("Powered by Sheppard’s Universal Proxy Theory — Continuous ψₛ–Depth–Kp Coherence.")
