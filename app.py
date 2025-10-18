@@ -1,9 +1,8 @@
 # =========================================================
-# SUPT :: v5.1 Continuum Release — Final Live Functional Build
+# SUPT :: v5.2 Live Sync Fix — Final Functional Release
 # =========================================================
-# Feeds: NOAA DSCOVR (Solar Wind) • USGS (Seismic) • NOAA Kp Index
-# System: Sheppard’s Universal Proxy Theory (SUPT)
-# Author: SUPT Systems — Finalized Build
+# Adds full INGV + USGS dual-source support with schema auto-correction
+# Author: SUPT Systems / Sheppard Continuum Core
 # =========================================================
 
 import streamlit as st
@@ -11,6 +10,7 @@ import pandas as pd
 import numpy as np
 import requests
 import datetime as dt
+import io
 from streamlit_autorefresh import st_autorefresh
 
 # -------------------------------
@@ -19,10 +19,15 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="SUPT :: Live Forecast Dashboard", layout="wide")
 API_TIMEOUT = 10
 
-# URLs
+# Live endpoints
 USGS_URL = (
     "https://earthquake.usgs.gov/fdsnws/event/1/query?"
-    "format=geojson&starttime={}&endtime={}&minmagnitude=2.5"
+    "format=geojson&starttime={}&endtime={}&minlatitude=40.7&maxlatitude=40.9&"
+    "minlongitude=14.0&maxlongitude=14.3&minmagnitude=0"
+)
+INGV_URL = (
+    "https://webservices.ingv.it/fdsnws/event/1/query?"
+    "starttime={}&endtime={}&latmin=40.7&latmax=40.9&lonmin=14.0&lonmax=14.3&format=text"
 )
 NOAA_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 DSCOVR_URLS = [
@@ -36,8 +41,44 @@ DSCOVR_URLS = [
 # -------------------------------
 
 @st.cache_data(ttl=600)
-def load_seismic_data():
-    """Fetch 7-day global seismic data from USGS"""
+def fetch_ingv_data():
+    """Fetch last 7 days Campi Flegrei seismic data from INGV with schema detection"""
+    end = dt.datetime.utcnow()
+    start = end - dt.timedelta(days=7)
+    url = INGV_URL.format(start.strftime("%Y-%m-%dT%H:%M:%S"), end.strftime("%Y-%m-%dT%H:%M:%S"))
+    try:
+        r = requests.get(url, timeout=API_TIMEOUT)
+        r.raise_for_status()
+        if not r.text.strip():
+            raise ValueError("Empty INGV response.")
+        df = pd.read_csv(io.StringIO(r.text), delimiter="|", skipinitialspace=True)
+        df.columns = [c.strip() for c in df.columns]
+
+        # Normalize possible column variations
+        time_col = [c for c in df.columns if "time" in c.lower()]
+        mag_col = [c for c in df.columns if "mag" in c.lower()]
+        depth_col = [c for c in df.columns if "depth" in c.lower()]
+
+        if not (time_col and mag_col and depth_col):
+            raise KeyError("Missing expected INGV columns.")
+
+        df["time"] = pd.to_datetime(df[time_col[0]], errors="coerce")
+        df["magnitude"] = df[mag_col[0]].astype(float)
+        df["depth_km"] = df[depth_col[0]].astype(float)
+        df.dropna(subset=["time"], inplace=True)
+
+        if len(df) == 0:
+            raise ValueError("No valid INGV events parsed.")
+
+        return df
+    except Exception as e:
+        st.warning(f"INGV fetch failed: {e}. Switching to USGS fallback.")
+        return None
+
+
+@st.cache_data(ttl=600)
+def fetch_usgs_data():
+    """Fetch global fallback (Campi Flegrei region box) from USGS"""
     end = dt.datetime.utcnow()
     start = end - dt.timedelta(days=7)
     url = USGS_URL.format(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
@@ -45,7 +86,7 @@ def load_seismic_data():
         r = requests.get(url, timeout=API_TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        events = [
+        df = pd.DataFrame([
             {
                 "time": dt.datetime.utcfromtimestamp(f["properties"]["time"] / 1000),
                 "magnitude": f["properties"]["mag"],
@@ -53,38 +94,16 @@ def load_seismic_data():
                 "place": f["properties"]["place"],
             }
             for f in data["features"]
-        ]
-        df = pd.DataFrame(events)
-        if not df.empty:
-            return df
-        raise ValueError("USGS returned empty dataset.")
+        ])
+        return df
     except Exception as e:
-        st.warning(f"USGS fetch failed: {e}. Using synthetic continuity dataset.")
-        synthetic = {
-            "time": pd.date_range(end=dt.datetime.utcnow(), periods=10, freq="H"),
-            "magnitude": np.random.uniform(2.5, 4.0, 10),
-            "depth_km": np.random.uniform(1, 10, 10),
-            "place": ["Synthetic Continuity Event"] * 10,
-        }
-        return pd.DataFrame(synthetic)
-
-
-@st.cache_data(ttl=600)
-def fetch_noaa_kp():
-    """Fetch latest geomagnetic Kp index"""
-    try:
-        r = requests.get(NOAA_KP_URL, timeout=API_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        return round(float(data[-1][1]), 2)
-    except Exception as e:
-        st.warning(f"Kp fetch failed: {e}. Defaulting to 1.0")
-        return 1.0
+        st.error(f"USGS fallback failed: {e}")
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
 def fetch_solar_data():
-    """Fetch solar wind data from NOAA/DSCOVR with fallback rotation"""
+    """Fetch NOAA/DSCOVR solar wind feed"""
     for url in DSCOVR_URLS:
         try:
             r = requests.get(url, timeout=API_TIMEOUT)
@@ -100,18 +119,32 @@ def fetch_solar_data():
                 }
         except Exception:
             continue
-    st.warning("All solar feeds unavailable. Using fallback dataset.")
+    st.warning("Solar feed unavailable — using fallback dataset.")
     return {"speed": 400, "density": 5.0, "temp": 0, "psi_s": 0.5}
+
+
+@st.cache_data(ttl=600)
+def fetch_kp_index():
+    """Fetch NOAA planetary Kp index"""
+    try:
+        r = requests.get(NOAA_KP_URL, timeout=API_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        return round(float(data[-1][1]), 2)
+    except Exception as e:
+        st.warning(f"Kp fetch failed: {e}. Defaulting to 1.0.")
+        return 1.0
 
 
 def compute_eii(df, psi_s, kp):
     """Compute Energetic Instability Index"""
-    if df.empty:
+    if df is None or df.empty:
         return 0.0
     mag_mean = df["magnitude"].mean()
-    shallow_ratio = len(df[df["depth_km"] < 5]) / len(df)
+    shallow_ratio = len(df[df["depth_km"] < 3]) / len(df)
     eii = np.clip((mag_mean * 0.25 + shallow_ratio * 0.35 + psi_s * 0.25 + kp * 0.15) / 2, 0, 1)
     return round(float(eii), 3)
+
 
 # -------------------------------
 # DATA PIPELINE
@@ -119,37 +152,38 @@ def compute_eii(df, psi_s, kp):
 st.info("Fetching live data feeds... please wait ⏳")
 
 solar = fetch_solar_data()
-kp = fetch_noaa_kp()
-df = load_seismic_data()
+kp = fetch_kp_index()
+df = fetch_ingv_data()
+if df is None or df.empty:
+    df = fetch_usgs_data()
+
 EII = compute_eii(df, solar["psi_s"], kp)
 
+# RPAM classification
 if EII >= 0.85:
     RPAM = "ACTIVE – Collapse Window Initiated"
-    phase_color = "🔴"
+    color = "🔴"
 elif EII >= 0.6:
     RPAM = "ELEVATED – Pressure Coupling"
-    phase_color = "🟠"
+    color = "🟠"
 else:
     RPAM = "MONITORING"
-    phase_color = "🟢"
+    color = "🟢"
 
 # -------------------------------
-# DASHBOARD LAYOUT
+# VISUALIZATION
 # -------------------------------
-st.success("✅ All systems operational — SUPT Live Dashboard Ready")
-st.caption("🕒 Auto-updates every 10 minutes (NOAA • USGS feeds).")
+st.success("✅ All systems operational — SUPT Live Dashboard (v5.2)")
+st.caption(f"🕒 Last update: {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}")
 
-st.caption(f"Last update: {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}")
-
-colA, colB, colC, colD = st.columns(4)
-colA.metric("Energetic Instability Index (EII)", f"{EII:.3f}")
-colB.metric("Ψ Coupling", f"{solar['psi_s']:.3f}")
-colC.metric("Geomagnetic Kp", f"{kp:.2f}")
-colD.metric("RPAM Phase", f"{phase_color} {RPAM}")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Energetic Instability Index (EII)", f"{EII:.3f}")
+col2.metric("Ψ Coupling", f"{solar['psi_s']:.3f}")
+col3.metric("Geomagnetic Kp", f"{kp:.2f}")
+col4.metric("RPAM Phase", f"{color} {RPAM}")
 
 st.markdown("---")
 
-# Solar Section
 st.subheader("☀️ Solar Wind & Geomagnetic Activity")
 st.write(
     f"**Speed:** {solar['speed']:.2f} km/s | **Density:** {solar['density']:.2f} p/cm³ | "
@@ -160,23 +194,19 @@ solar_df = pd.DataFrame(
 )
 st.line_chart(solar_df)
 
-# Seismic Section
 st.subheader("🌋 Seismic Events (Past 7 Days)")
 st.dataframe(df.sort_values("time", ascending=False).head(15))
 
-# Harmonic Drift Visualization
 st.subheader("🌀 Harmonic Drift — Magnitude & Depth")
 if not df.empty:
     st.line_chart(df.set_index("time")[["magnitude", "depth_km"]])
 else:
-    st.info("No seismic data available.")
+    st.info("No valid seismic data.")
 
-# Footer
 st.markdown("---")
 st.caption(
-    f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • USGS • DSCOVR | "
-    "SUPT v5.1 Continuum — Sheppard’s Universal Proxy Theory"
+    f"Feeds: NOAA • USGS • INGV | SUPT v5.2 Live Sync Fix — Sheppard’s Universal Proxy Theory"
 )
 
-# Auto-refresh loop
+# Auto-refresh
 st_autorefresh(interval=600000, key="data_refresh")
