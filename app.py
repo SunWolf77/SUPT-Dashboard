@@ -21,7 +21,7 @@ st.set_page_config(page_title="SUPT :: Live Forecast Dashboard", layout="wide")
 API_TIMEOUT = 10
 USGS_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime={}&endtime={}&minmagnitude=2.5&maxlatitude=40.9&minlatitude=40.7&maxlongitude=14.3&minlongitude=14.0"
 NOAA_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-DSCOVR_SOLAR_URL = "https://services.swpc.noaa.gov/products/summary/solar-wind.json"
+DSCOVR_SOLAR_URL = "https://services.swpc.noaa.gov/products/solar-wind/plasma-1-day.json"
 
 # -------------------------------
 # FUNCTIONS
@@ -76,17 +76,17 @@ def fetch_noaa_kp():
 
 @st.cache_data(ttl=600)
 def fetch_solar_data():
-    """Fetch solar wind parameters from NOAA/DSCOVR"""
+    """Fetch solar wind parameters from NOAA/DSCOVR (updated endpoint)"""
     try:
         r = requests.get(DSCOVR_SOLAR_URL, timeout=API_TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        last = data[-1]
+        last = data[-1]  # latest measurement
         return {
-            "speed": float(last.get("speed", 0)),
-            "density": float(last.get("density", 0)),
-            "temp": float(last.get("temperature", 0)),
-            "psi_s": np.clip(float(last.get("speed", 0)) / 800, 0, 1)
+            "speed": float(last[1]) if len(last) > 1 else 0,
+            "density": float(last[2]) if len(last) > 2 else 0,
+            "temp": float(last[3]) if len(last) > 3 else 0,
+            "psi_s": np.clip(float(last[1]) / 800, 0, 1)
         }
     except Exception as e:
         st.warning(f"Solar feed unavailable: {e}. Using fallback.")
