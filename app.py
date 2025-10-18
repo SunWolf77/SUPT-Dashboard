@@ -1,9 +1,9 @@
-# ================================================================
-# 🌞🐺 SunWolf's Forecast Dashboard v7.0 (Production Build)
-# ================================================================
-# Live Data: INGV 🇮🇹 | USGS 🌍 | EMSC 🇪🇺 | NOAA ☀️ | Synthetic 🧪
-# Full SUPT Tri-Coupled Monitoring Engine
-# ================================================================
+# ===============================================================
+# SunWolf's Forecast Dashboard v8.0 — LIVE CORE BUILD
+# ===============================================================
+# LIVE DATA ONLY — NOAA ☀️ | USGS 🌍 | INGV 🇮🇹 | EMSC 🇪🇺
+# No synthetic data. If a source is down, dashboard displays outage.
+# ===============================================================
 
 import streamlit as st
 import pandas as pd
@@ -12,21 +12,13 @@ import requests
 import datetime as dt
 import io
 
-st.set_page_config(page_title="SUPT :: GROK Forecast Dashboard", layout="wide")
+st.set_page_config(page_title="SunWolf's Forecast Dashboard", layout="wide")
 
-# ================================================================
-# --- UTILITIES ---
-# ================================================================
-def safe_request(url, timeout=10):
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code == 200 and len(r.text) > 100:
-            return r.text
-    except Exception:
-        return None
-    return None
-
-def safe_json(url, timeout=10):
+# ===============================================================
+# --- HELPERS ---
+# ===============================================================
+def try_get_json(url, timeout=10):
+    """Returns parsed JSON or None."""
     try:
         r = requests.get(url, timeout=timeout)
         if r.status_code == 200:
@@ -35,68 +27,76 @@ def safe_json(url, timeout=10):
         pass
     return None
 
-# ================================================================
-# --- SOLAR + GEOMAGNETIC DATA ---
-# ================================================================
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_noaa_solar():
+def try_get_text(url, timeout=10):
+    """Returns plain text or None."""
     try:
-        # Solar wind from DSCOVR via NOAA SWPC
-        sw_url = "https://services.swpc.noaa.gov/products/summary/solar-wind.json"
-        kp_url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-        sw_data = requests.get(sw_url, timeout=10).json()
-        kp_data = requests.get(kp_url, timeout=10).json()
-
-        # Extract key values
-        latest_sw = sw_data[-1] if isinstance(sw_data, list) else sw_data
-        vel = float(latest_sw.get("speed", 450))
-        dens = float(latest_sw.get("density", 4))
-        bt = float(latest_sw.get("bt", 5))
-        kp = float(kp_data[-1][1]) if isinstance(kp_data, list) else 2.0
-
-        return {
-            "solar_speed": vel,
-            "solar_density": dens,
-            "bt": bt,
-            "kp": kp,
-            "status": "Live NOAA Feed"
-        }
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 200 and len(r.text) > 100:
+            return r.text
     except Exception:
-        return {
-            "solar_speed": 420,
-            "solar_density": 3.0,
-            "bt": 4.5,
-            "kp": 1.7,
-            "status": "Synthetic Fallback"
-        }
+        pass
+    return None
 
-# ================================================================
+
+# ===============================================================
+# --- SOLAR + GEOMAGNETIC DATA (NOAA SWPC LIVE) ---
+# ===============================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def load_noaa():
+    sw_url = "https://services.swpc.noaa.gov/products/summary/solar-wind.json"
+    kp_url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+
+    sw_data = try_get_json(sw_url)
+    kp_data = try_get_json(kp_url)
+
+    if isinstance(sw_data, list) and len(sw_data) > 0:
+        last = sw_data[-1]
+        vel = float(last.get("speed", 0))
+        dens = float(last.get("density", 0))
+        bt = float(last.get("bt", 0))
+    else:
+        vel, dens, bt = None, None, None
+
+    if isinstance(kp_data, list) and len(kp_data) > 1:
+        kp = float(kp_data[-1][1])
+    else:
+        kp = None
+
+    return {
+        "solar_speed": vel,
+        "solar_density": dens,
+        "bt": bt,
+        "kp": kp
+    }
+
+
+# ===============================================================
 # --- SEISMIC DATA AGGREGATOR ---
-# ================================================================
+# ===============================================================
 @st.cache_data(ttl=900, show_spinner=False)
-def load_seismic_data():
+def load_seismic():
     now = dt.datetime.utcnow()
-    end_time = now.strftime("%Y-%m-%dT%H:%M:%S")
-    start_time = (now - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+    end = now.strftime("%Y-%m-%dT%H:%M:%S")
+    start = (now - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    df, src = pd.DataFrame(), "None"
-
-    # 1️⃣ INGV
-    ingv = safe_request(
+    # 1️⃣ INGV — Italy
+    ingv = try_get_text(
         f"https://webservices.ingv.it/fdsnws/event/1/query?"
-        f"starttime={start_time}&endtime={end_time}&minmag=2.0&format=text"
+        f"starttime={start}&endtime={end}&minmag=2.0&format=text"
     )
     if ingv:
         try:
             dfi = pd.read_csv(io.StringIO(ingv), delimiter="|", comment="#")
-            tc = next((c for c in dfi.columns if "Time" in c), None)
-            mc = next((c for c in dfi.columns if "Mag" in c), None)
-            dc = next((c for c in dfi.columns if "Depth" in c), None)
-            if all([tc, mc, dc]):
+            t, m, d = None, None, None
+            for c in dfi.columns:
+                if "Time" in c: t = c
+                elif "Mag" in c: m = c
+                elif "Depth" in c: d = c
+            if t and m and d:
                 df = pd.DataFrame({
-                    "time": pd.to_datetime(dfi[tc], errors="coerce"),
-                    "magnitude": pd.to_numeric(dfi[mc], errors="coerce"),
-                    "depth_km": pd.to_numeric(dfi[dc], errors="coerce"),
+                    "time": pd.to_datetime(dfi[t], errors="coerce"),
+                    "magnitude": pd.to_numeric(dfi[m], errors="coerce"),
+                    "depth_km": pd.to_numeric(dfi[d], errors="coerce"),
                     "place": "Italy (INGV)"
                 }).dropna()
                 if not df.empty:
@@ -104,15 +104,15 @@ def load_seismic_data():
         except Exception:
             pass
 
-    # 2️⃣ USGS
-    usgs = safe_request(
+    # 2️⃣ USGS — Global
+    usgs = try_get_text(
         f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
-        f"format=csv&starttime={start_time}&endtime={end_time}&minmagnitude=4"
+        f"format=csv&starttime={start}&endtime={end}&minmagnitude=4"
     )
     if usgs:
         try:
             dfg = pd.read_csv(io.StringIO(usgs))
-            if all(c in dfg.columns for c in ["time", "mag", "depth", "place"]):
+            if all(x in dfg.columns for x in ["time", "mag", "depth", "place"]):
                 df = pd.DataFrame({
                     "time": pd.to_datetime(dfg["time"], errors="coerce"),
                     "magnitude": pd.to_numeric(dfg["mag"], errors="coerce"),
@@ -124,10 +124,10 @@ def load_seismic_data():
         except Exception:
             pass
 
-    # 3️⃣ EMSC
-    emsc_json = safe_json("https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=50")
-    if emsc_json and "features" in emsc_json:
-        feats = emsc_json["features"]
+    # 3️⃣ EMSC — European backup
+    emsc = try_get_json("https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=50")
+    if emsc and "features" in emsc:
+        feats = emsc["features"]
         if feats:
             df = pd.DataFrame({
                 "time": [pd.to_datetime(f["properties"]["time"]) for f in feats],
@@ -138,84 +138,74 @@ def load_seismic_data():
             if not df.empty:
                 return df, "EMSC 🇪🇺"
 
-    # 4️⃣ Synthetic fallback
-    now = dt.datetime.utcnow()
-    df = pd.DataFrame({
-        "time": [now - dt.timedelta(hours=i) for i in range(24)][::-1],
-        "magnitude": np.random.uniform(3.5, 5.5, 24),
-        "depth_km": np.random.uniform(5, 15, 24),
-        "place": ["Synthetic Continuity"] * 24
-    })
-    return df, "Synthetic 🧪"
+    # If no feed worked, return empty DataFrame
+    return pd.DataFrame(), "No Live Feed ⚠️"
 
-# ================================================================
+
+# ===============================================================
 # --- SUPT METRICS ---
-# ================================================================
-def compute_eii(df, solar):
-    if df.empty:
-        return 0.0
-    md_max = df["magnitude"].max()
-    md_mean = df["magnitude"].mean()
-    shallow_ratio = (df["depth_km"] < 10).mean()
-    psi = (solar["solar_speed"] / 800) * 0.5 + (solar["solar_density"] / 10) * 0.5
-    eii = np.clip(md_max * 0.2 + md_mean * 0.15 + shallow_ratio * 0.35 + psi * 0.3, 0, 1)
-    return eii, psi
+# ===============================================================
+def compute_metrics(df, solar):
+    if df.empty or not solar["solar_speed"]:
+        return 0.0, 0.0, "No live coupling data."
 
-# ================================================================
-# --- DASHBOARD BODY ---
-# ================================================================
+    shallow = (df["depth_km"] < 15).mean()
+    mag_mean = df["magnitude"].mean()
+    psi_coupling = (solar["solar_speed"] / 800) * 0.6 + (solar["solar_density"] / 10) * 0.4
+    eii = np.clip(mag_mean * 0.25 + shallow * 0.35 + psi_coupling * 0.4, 0, 1)
+
+    rpam = (
+        "ACTIVE — Collapse Window Initiated" if eii > 0.85 else
+        "ELEVATED — Pressure Coupling Phase" if eii > 0.6 else
+        "STABLE"
+    )
+    return eii, psi_coupling, rpam
+
+
+# ===============================================================
+# --- DASHBOARD ---
+# ===============================================================
 st.title("🌞🐺 SunWolf's Forecast Dashboard")
-st.caption("v7.0 — Real-Time Solar–Geomagnetic–Seismic SUPT Engine")
+st.caption("v8.0 — Live Core Build (NOAA + USGS + INGV + EMSC)")
 
-solar = fetch_noaa_solar()
-df, src = load_seismic_data()
+solar = load_noaa()
+df, src = load_seismic()
 
-# Header status
-feed_color = {"INGV 🇮🇹": "🟢", "USGS 🌍": "🔵", "EMSC 🇪🇺": "🟣", "Synthetic 🧪": "🔴"}[src]
-st.markdown(f"### {feed_color} Active Seismic Feed: **{src}** ☀️ Solar Feed: **{solar['status']}**")
+feed_icon = {"INGV 🇮🇹":"🟢","USGS 🌍":"🔵","EMSC 🇪🇺":"🟣","No Live Feed ⚠️":"⚠️"}[src]
+solar_status = "🟢 Live" if solar["solar_speed"] else "⚠️ Offline"
+
+st.markdown(f"### {feed_icon} Active Seismic Feed: **{src}** ☀️ Solar Feed: **{solar_status}**")
 
 if df.empty:
-    st.error("No seismic data available.")
+    st.error("No live seismic data could be retrieved from any active feed.")
     st.stop()
 
-# ---------------------------------------------------------------
-# METRICS PANEL
-# ---------------------------------------------------------------
-EII, PSI = compute_eii(df, solar)
-RPAM = "ACTIVE – Collapse Window Initiated" if EII > 0.85 else (
-    "ELEVATED – Pressure Coupling Phase" if EII > 0.6 else "STABLE"
-)
+EII, PSI, RPAM = compute_metrics(df, solar)
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("EII", f"{EII:.3f}")
-col2.metric("Ψ Coupling", f"{PSI:.3f}")
-col3.metric("Solar Wind Density (p/cm³)", f"{solar['solar_density']:.2f}")
-col4.metric("Geomagnetic Kp", f"{solar['kp']:.1f}")
+# Metrics display
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("EII", f"{EII:.3f}")
+c2.metric("Ψ Coupling", f"{PSI:.3f}")
+c3.metric("Solar Wind Density (p/cm³)", f"{solar['solar_density'] or '—'}")
+c4.metric("Geomagnetic Kp", f"{solar['kp'] or '—'}")
 
 st.markdown(f"### RPAM Status: **{RPAM}**")
 
-# ---------------------------------------------------------------
-# VISUALS
-# ---------------------------------------------------------------
+# Data Tables
 st.subheader("🕳️ Seismic Events — Last 7 Days")
-st.dataframe(df[["time", "magnitude", "depth_km", "place"]].sort_values("time", ascending=False).head(20))
+st.dataframe(df.sort_values("time", ascending=False).head(30))
 
+# Charts
 st.subheader("📈 Harmonic Drift — Magnitude & Depth")
 st.line_chart(df.set_index("time")[["magnitude", "depth_km"]])
 
-st.subheader("☀️ Solar Dynamics — Past Readings (Sample)")
-solar_sample = pd.DataFrame({
-    "Solar Wind (km/s)": np.clip(np.random.normal(solar["solar_speed"], 25, 24), 300, 800),
-    "Density (p/cm³)": np.clip(np.random.normal(solar["solar_density"], 0.5, 24), 0.1, 10),
-    "Kp Index": np.clip(np.random.normal(solar["kp"], 0.4, 24), 0, 9)
-})
-st.line_chart(solar_sample)
+# Solar Data Summary
+if solar["solar_speed"]:
+    st.subheader("☀️ NOAA Solar Wind — Latest Values")
+    st.write(f"**Speed:** {solar['solar_speed']} km/s | **Density:** {solar['solar_density']} p/cm³ | **Bₜ:** {solar['bt']} | **Kp:** {solar['kp']}")
+else:
+    st.warning("No live NOAA solar data available at this time.")
 
-# ---------------------------------------------------------------
-# FOOTER
-# ---------------------------------------------------------------
-st.caption(
-    f"Updated {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | "
-    f"Feeds: NOAA ☀️ / INGV 🇮🇹 / USGS 🌍 / EMSC 🇪🇺 | SUPT v7.0"
-)
+# Footer
+st.caption(f"Updated {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | Feeds: NOAA ☀️ / USGS 🌍 / INGV 🇮🇹 / EMSC 🇪🇺 | SUPT v8.0")
 st.caption("Powered by Sheppard’s Universal Proxy Theory — Solar–Geophysical Coupling Monitor")
