@@ -204,6 +204,31 @@ def compute_metrics(df, solar):
         "STABLE"
     )
     return eii, psi_coupling, rpam
+# --- COMPACT HEADER DISPLAY ---
+st.markdown("## SUPT Live Overview")
+colA, colB, colC, colD = st.columns(4)
+colA.metric("Energetic Instability Index (EII)", f"{EII:.3f}")
+colB.metric("Ψ Coupling", f"{solar['psi_s']:.3f}" if solar['psi_s'] else "N/A")
+colC.metric("Geomagnetic Kp", f"{solar['kp']:.2f}" if solar['kp'] else "N/A")
+colD.metric("RPAM Phase", RPAM)
+
+# --- COLLAPSIBLE PANELS ---
+with st.expander("☀️ Solar Dynamics (NOAA/DSCOVR)", expanded=True):
+    st.write(f"**Speed:** {solar['solar_speed']} km/s | "
+             f"**Density:** {solar['solar_density']} p/cm³ | "
+             f"**Temp:** {solar['temp']} K | **ψₛ:** {solar['psi_s']:.3f}")
+    if solar['solar_speed']:
+        st.line_chart({
+            "Solar Speed (km/s)": [solar['solar_speed']],
+            "Density (p/cm³)": [solar['solar_density']],
+            "Kp Index": [solar['kp']]
+        })
+
+with st.expander("🌋 Seismic Events (Last 7 Days)", expanded=False):
+    st.dataframe(df.sort_values("time", ascending=False).head(20))
+
+with st.expander("🌀 Harmonic Drift — Magnitude & Depth", expanded=False):
+    st.line_chart(df.set_index("time")[["magnitude", "depth_km"]])
 
 
 # ===============================================================
