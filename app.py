@@ -1,5 +1,5 @@
 # ===============================================================
-# SunWolf's Forecast Dashboard (Live Continuum Stable Build) v3.9.5
+# SUPT :: GROK Forecast Dashboard (Live Continuum Stable Build) v3.9.5
 # ===============================================================
 
 import streamlit as st
@@ -132,7 +132,7 @@ def generate_forecast_wave(psi_s, hours=48):
 # MAIN DASHBOARD
 # ===============================================================
 st.set_page_config(layout="wide")
-st.title("🌞🐺 SunWolf's Forecast Dashboard")
+st.title("SUPT :: GROK Forecast Dashboard")
 
 # Data Fetch
 df = load_seismic_data()
