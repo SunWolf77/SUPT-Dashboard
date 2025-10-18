@@ -1,8 +1,5 @@
 # ===============================================================
-# SUPT :: GROK Forecast Dashboard — v6.1 Total Continuum Integration
-# ===============================================================
-# Fully live integration of NOAA + USGS + INGV + NASA DONKI CME data
-# SUPT Physics Model: ψs–Depth–Kp Coupling & CME Disturbance Index
+# SUPT :: GROK Forecast Dashboard (Live Continuum Stable Build) v3.9.5
 # ===============================================================
 
 import streamlit as st
@@ -11,206 +8,204 @@ import numpy as np
 import requests
 import datetime as dt
 import io
+import traceback
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
 
-# ---------------------------------------------------------------
+# ===============================================================
 # CONFIGURATION
-# ---------------------------------------------------------------
-st.set_page_config(page_title="SUPT :: Live Continuum Dashboard", layout="wide")
+# ===============================================================
 API_TIMEOUT = 10
-NASA_API_KEY = "DEMO_KEY"  # Replace with your NASA API key from https://api.nasa.gov
-
-# Endpoints
+LOCAL_FALLBACK_CSV = "events_6.csv"
 NOAA_GEOMAG_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-NOAA_SOLAR_WIND_URL = "https://services.swpc.noaa.gov/products/solar-wind/plasma-7-day.json"
-NOAA_FLARE_URL = "https://services.swpc.noaa.gov/json/goes/primary/xray-flares-latest.json"
-USGS_EQ_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query?"
-INGV_URL = "https://webservices.ingv.it/fdsnws/event/1/query?"
-NASA_DONKI_URL = f"https://api.nasa.gov/DONKI/CME?api_key={NASA_API_KEY}"
+INGV_API_URL = "https://webservices.ingv.it/fdsnws/event/1/query?"
 
-DEFAULT_SOLAR = {"psi_s": 0.72, "solar_speed": 688, "density": 5.0}
+DEFAULT_SOLAR = {
+    "C_flare": 0.99, "M_flare": 0.55, "X_flare": 0.15,
+    "psi_s": 0.72, "solar_speed": 688
+}
 
-# ---------------------------------------------------------------
-# FUNCTIONS
-# ---------------------------------------------------------------
-def compute_eii(mag_max, mag_mean, shallow_ratio, psi_s):
-    """SUPT Energetic Instability Index"""
-    return np.clip((mag_max * 0.25 + mag_mean * 0.25 + shallow_ratio * 0.25 + psi_s * 0.25), 0, 1)
+# ===============================================================
+# UTILITY FUNCTIONS
+# ===============================================================
+def compute_eii(md_max, md_mean, shallow_ratio, psi_s):
+    """Energetic Instability Index"""
+    return np.clip((md_max * 0.2 + md_mean * 0.15 + shallow_ratio * 0.4 + psi_s * 0.25), 0, 1)
 
 def classify_phase(EII):
+    """SUPT phase classification"""
     if EII >= 0.85:
-        return "ACTIVE – Collapse Window Initiated", "🔴"
+        return "ACTIVE – Collapse Window Initiated"
     elif EII >= 0.6:
-        return "ELEVATED – Pressure Coupling", "🟠"
-    return "MONITORING", "🟢"
+        return "ELEVATED – Pressure Coupling Phase"
+    return "MONITORING"
 
-def classify_cme_risk(cme_count, kp):
-    """CME storm gauge logic"""
-    if cme_count > 3 or kp >= 6:
-        return "Severe Solar Storm", "🔴"
-    elif cme_count >= 1 or kp >= 4:
-        return "Disturbed Field", "🟠"
-    else:
-        return "Calm Conditions", "🟢"
-
-def generate_synthetic_data(n=20):
+def generate_synthetic_seismic_data(n=20):
+    """Synthetic fallback data when APIs fail"""
     now = dt.datetime.utcnow()
     times = [now - dt.timedelta(hours=i * 3) for i in range(n)]
-    mags = np.random.uniform(0.5, 1.5, n)
-    depths = np.random.uniform(0.5, 5.0, n)
+    mags = np.random.uniform(0.5, 1.3, n)
+    depths = np.random.uniform(0.8, 3.0, n)
     return pd.DataFrame({"time": times, "magnitude": mags, "depth_km": depths})
 
-# ---------------------------------------------------------------
-# FETCH FUNCTIONS
-# ---------------------------------------------------------------
+# ===============================================================
+# NOAA FETCH — GEOMAGNETIC ACTIVITY
+# ===============================================================
 @st.cache_data(ttl=600)
-def fetch_noaa_kp():
+def fetch_geomag_data():
     try:
         r = requests.get(NOAA_GEOMAG_URL, timeout=API_TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        return float(data[-1][1])
-    except Exception as e:
-        st.warning(f"Kp fetch failed: {e}")
-        return 1.0
-
-@st.cache_data(ttl=600)
-def fetch_solar_data():
-    try:
-        r = requests.get(NOAA_SOLAR_WIND_URL, timeout=API_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        last = data[-1]
+        latest = data[-1]
         return {
-            "speed": float(last[1]),
-            "density": float(last[2]),
-            "psi_s": np.clip(float(last[1]) / 800, 0, 1),
-            "timestamp": last[0],
+            "kp_index": float(latest[1]),
+            "time_tag": latest[0],
+            "geomag_alert": "HIGH" if float(latest[1]) >= 5 else "LOW"
         }
     except Exception as e:
-        st.warning(f"Solar data fetch failed: {e}")
-        return DEFAULT_SOLAR
+        st.warning(f"NOAA fetch failed: {e}")
+        return {"kp_index": 0.0, "time_tag": "Fallback", "geomag_alert": "LOW"}
 
+# ===============================================================
+# INGV FETCH — SEISMIC ACTIVITY (Campi Flegrei)
+# ===============================================================
 @st.cache_data(ttl=600)
-def fetch_ingv_seismic():
+def fetch_ingv_seismic_data():
     try:
         now = dt.datetime.utcnow()
-        start = now - dt.timedelta(days=7)
+        start_time = now - dt.timedelta(days=7)
         params = {
-            "starttime": start.strftime("%Y-%m-%dT%H:%M:%S"),
+            "starttime": start_time.strftime("%Y-%m-%dT%H:%M:%S"),
             "endtime": now.strftime("%Y-%m-%dT%H:%M:%S"),
             "latmin": 40.7, "latmax": 40.9,
             "lonmin": 14.0, "lonmax": 14.3,
-            "format": "text",
+            "format": "text"
         }
-        r = requests.get(INGV_URL, params=params, timeout=API_TIMEOUT)
+        r = requests.get(INGV_API_URL, params=params, timeout=API_TIMEOUT)
         r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text), delimiter="|", skipinitialspace=True)
-        df.columns = [c.strip() for c in df.columns]
-
-        # Normalize columns dynamically
-        time_col = [c for c in df.columns if "time" in c.lower()]
-        mag_col = [c for c in df.columns if "mag" in c.lower()]
-        depth_col = [c for c in df.columns if "depth" in c.lower()]
-
-        if not (time_col and mag_col and depth_col):
-            raise KeyError("Missing INGV columns")
-
-        df["time"] = pd.to_datetime(df[time_col[0]], errors="coerce")
-        df["magnitude"] = pd.to_numeric(df[mag_col[0]], errors="coerce")
-        df["depth_km"] = pd.to_numeric(df[depth_col[0]], errors="coerce")
-        df = df.dropna(subset=["time", "magnitude", "depth_km"])
+        df = pd.read_csv(io.StringIO(r.text), delimiter="|")
+        df['time'] = pd.to_datetime(df['Time'], errors='coerce')
+        df['magnitude'] = pd.to_numeric(df['Magnitude'], errors='coerce')
+        df['depth_km'] = pd.to_numeric(df['Depth/Km'], errors='coerce')
+        df = df.dropna(subset=['time', 'magnitude', 'depth_km'])
         return df
     except Exception as e:
         st.warning(f"INGV fetch failed: {e}")
         return pd.DataFrame()
 
+# ===============================================================
+# FALLBACK SEISMIC DATA HANDLER
+# ===============================================================
 @st.cache_data(ttl=600)
-def fetch_nasa_cme():
-    try:
-        now = dt.datetime.utcnow()
-        start = now - dt.timedelta(days=7)
-        url = f"{NASA_DONKI_URL}&startDate={start.strftime('%Y-%m-%d')}&endDate={now.strftime('%Y-%m-%d')}"
-        r = requests.get(url, timeout=API_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        return len(data)
-    except Exception as e:
-        st.warning(f"NASA CME fetch failed: {e}")
-        return 0
+def load_seismic_data():
+    df = fetch_ingv_seismic_data()
+    if df.empty:
+        try:
+            df = pd.read_csv(LOCAL_FALLBACK_CSV)
+            df['time'] = pd.to_datetime(df['Time'], errors='coerce')
+            df['magnitude'] = pd.to_numeric(df['MD'], errors='coerce')
+            df['depth_km'] = pd.to_numeric(df['Depth'], errors='coerce')
+            df = df.dropna(subset=['time', 'magnitude', 'depth_km'])
+            recent_start = dt.datetime.utcnow() - dt.timedelta(days=7)
+            return df[df['time'] >= recent_start]
+        except Exception as e:
+            st.info("Local fallback failed. Using synthetic dataset.")
+            return generate_synthetic_seismic_data()
+    return df
 
-# ---------------------------------------------------------------
-# LIVE DATA PIPELINE
-# ---------------------------------------------------------------
-st.info("Fetching live data feeds... please wait ⏳")
+# ===============================================================
+# SOLAR HISTORY & FORECAST SIMULATION
+# ===============================================================
+def generate_solar_history(psi_s, hours=24):
+    now = dt.datetime.utcnow()
+    times = [now - dt.timedelta(hours=i) for i in range(hours)][::-1]
+    psi_vals = np.random.normal(psi_s, 0.05, hours)
+    return pd.DataFrame({"time": times, "psi_s": psi_vals})
 
-solar = fetch_solar_data()
-kp = fetch_noaa_kp()
-cme_count = fetch_nasa_cme()
-df = fetch_ingv_seismic()
+def generate_forecast_wave(psi_s, hours=48):
+    now = dt.datetime.utcnow()
+    times = [now + dt.timedelta(hours=i) for i in range(hours)]
+    forecast_psi = np.sin(np.linspace(0, np.pi * 2, hours)) * 0.3 + psi_s
+    return pd.DataFrame({"hour": range(hours), "forecast_psi": forecast_psi})
 
-if df.empty:
-    df = generate_synthetic_data()
+# ===============================================================
+# MAIN DASHBOARD
+# ===============================================================
+st.set_page_config(layout="wide")
+st.title("SUPT :: GROK Forecast Dashboard")
+
+# Data Fetch
+df = load_seismic_data()
+geomag = fetch_geomag_data()
 
 # Compute SUPT metrics
-mag_max = df["magnitude"].max()
-mag_mean = df["magnitude"].mean()
-shallow_ratio = len(df[df["depth_km"] < 3]) / len(df)
-EII = compute_eii(mag_max, mag_mean, shallow_ratio, solar["psi_s"])
-RPAM, rpam_color = classify_phase(EII)
-solar_risk, solar_icon = classify_cme_risk(cme_count, kp)
+md_max = df['magnitude'].max()
+md_mean = df['magnitude'].mean()
+shallow_ratio = len(df[df["depth_km"] < 2.5]) / max(len(df), 1)
+psi_s = DEFAULT_SOLAR["psi_s"]
 
-# ---------------------------------------------------------------
-# LAYOUT
-# ---------------------------------------------------------------
-st.success("✅ All systems operational — SUPT v6.1 Continuum Integrated")
-st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}")
+EII = compute_eii(md_max, md_mean, shallow_ratio, psi_s)
+RPAM = classify_phase(EII)
 
-col1, col2, col3, col4 = st.columns(4)
+# Display Metrics
+col1, col2, col3 = st.columns(3)
 col1.metric("Energetic Instability Index (EII)", f"{EII:.3f}")
-col2.metric("Ψ Coupling", f"{solar['psi_s']:.3f}")
-col3.metric("Geomagnetic Kp", f"{kp:.2f}")
-col4.metric("RPAM Phase", f"{rpam_color} {RPAM}")
+col2.metric("RPAM Phase", RPAM)
+col3.metric("Geomagnetic Kp", f"{geomag['kp_index']:.1f}")
 
-st.markdown("---")
+# ===============================================================
+# COHERENCE GAUGE
+# ===============================================================
+st.markdown("### ☯ SUPT ψₛ Coupling — 24 h Harmonic Drift")
+if not df.empty:
+    psi_hist = generate_solar_history(psi_s)
+    depth_signal = np.interp(np.linspace(0, len(df) - 1, 24), np.arange(len(df)),
+                             np.clip(df["depth_km"].rolling(3, min_periods=1).mean(), 0, 5))
+    psi_norm = (psi_hist["psi_s"] - np.mean(psi_hist["psi_s"])) / np.std(psi_hist["psi_s"])
+    depth_norm = (depth_signal - np.mean(depth_signal)) / np.std(depth_signal)
+    cci = np.corrcoef(psi_norm, depth_norm)[0, 1] ** 2 if len(df) > 1 else 0
 
-# Solar Disturbance Gauge
-st.markdown(f"### 🌌 Solar Risk Gauge — {solar_icon} {solar_risk}")
-gauge = go.Figure(go.Indicator(
-    mode="gauge+number",
-    value=cme_count,
-    title={"text": f"CME Count (7 days): {cme_count}"},
-    gauge={
-        "axis": {"range": [0, 10]},
-        "bar": {"color": "red" if cme_count > 3 else "orange" if cme_count > 0 else "green"},
-        "steps": [
-            {"range": [0, 1], "color": "#C8E6C9"},
-            {"range": [1, 3], "color": "#FFF59D"},
-            {"range": [3, 10], "color": "#FFCDD2"},
-        ],
-    },
+    color = "green" if cci >= 0.7 else "orange" if cci >= 0.4 else "red"
+    label = "Coherent" if cci >= 0.7 else "Moderate" if cci >= 0.4 else "Decoupled"
+
+    gauge = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=cci,
+        title={"text": f"CCI: {label}"},
+        gauge={
+            "axis": {"range": [0, 1]},
+            "bar": {"color": color},
+            "steps": [
+                {"range": [0, 0.4], "color": "#FFCDD2"},
+                {"range": [0.4, 0.7], "color": "#FFF59D"},
+                {"range": [0.7, 1.0], "color": "#C8E6C9"}
+            ]
+        }
+    ))
+    st.plotly_chart(gauge, use_container_width=True)
+else:
+    st.info("No data for CCI gauge.")
+
+# ===============================================================
+# FORECAST WAVEFORM
+# ===============================================================
+st.markdown("### 🔮 ψₛ Temporal Resonance Forecast (Next 48 Hours)")
+forecast = generate_forecast_wave(psi_s)
+fig = go.Figure()
+fig.add_trace(go.Scatter(
+    x=forecast["hour"], y=forecast["forecast_psi"],
+    mode="lines", line=dict(color="#FFB300", width=3), name="ψₛ Forecast"
 ))
-st.plotly_chart(gauge, use_container_width=True)
-
-# Solar Data Summary
-st.subheader("☀️ Solar Wind & Geomagnetic Activity")
-st.write(
-    f"**Speed:** {solar['speed']:.2f} km/s | **Density:** {solar['density']:.2f} p/cm³ | **ψₛ:** {solar['psi_s']:.3f}"
+fig.update_layout(
+    title="48-Hour ψₛ Temporal Wave Forecast",
+    xaxis_title="Hours Ahead",
+    yaxis_title="ψₛ Index",
+    template="plotly_white"
 )
-solar_df = pd.DataFrame({"Speed (km/s)": [solar["speed"]], "Density (p/cm³)": [solar["density"]], "Kp": [kp]})
-st.line_chart(solar_df)
+st.plotly_chart(fig, use_container_width=True)
 
-# Seismic Table
-st.subheader("🌋 Seismic Events (Past 7 Days)")
-st.dataframe(df.sort_values("time", ascending=False).head(15))
-
-# Harmonic Drift
-st.subheader("🌀 Harmonic Drift — Magnitude & Depth")
-st.line_chart(df.set_index("time")[["magnitude", "depth_km"]])
-
-st.markdown("---")
-st.caption("Feeds: NOAA • INGV • USGS • NASA | SUPT v6.1 Total Continuum Integration — Sheppard’s Universal Proxy Theory")
-
-# Auto-refresh
-st_autorefresh(interval=600000, key="data_refresh")
+# ===============================================================
+# FOOTER
+# ===============================================================
+st.caption(f"Updated {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} | Feeds: NOAA • INGV | SUPT v3.9.5")
+st.caption("Powered by Sheppard’s Universal Proxy Theory — Continuous ψₛ–Depth–Kp Coherence.")
