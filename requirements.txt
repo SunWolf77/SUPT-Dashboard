@@ -1,3 +1,5 @@
-streamlit
-plotly
+streamlit==1.38.0
+pandas
+numpy
 requests
+streamlit-autorefresh
