@@ -13,7 +13,7 @@ import requests
 import datetime as dt
 import io
 
-st.set_page_config(page_title="SunWolf's Live Forecast Dashboard", layout="wide")
+st.set_page_config(page_title="SUPT :: Live Forecast Dashboard", layout="wide")
 
 # -------------------------------
 # CONFIGURATION
@@ -150,3 +150,6 @@ else:
 # --- Footer ---
 st.markdown("---")
 st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • USGS • DSCOVR | SUPT Final Build — Sheppard’s Universal Proxy Theory")
+
+# Auto-refresh every 10 minutes
+st_autorefresh(interval=600000, key="datarefresh")
