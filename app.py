@@ -43,31 +43,75 @@ def try_get_text(url, timeout=10):
 # ===============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def load_noaa():
-    sw_url = "https://services.swpc.noaa.gov/products/summary/solar-wind.json"
-    kp_url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+    """Fetch live NOAA and DSCOVR solar parameters with continuity fallback."""
+    try:
+        # Primary feed (NOAA SWPC solar wind)
+        sw_url = "https://services.swpc.noaa.gov/products/summary/solar-wind.json"
+        kp_url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+        dscovr_url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-5-minute.json"
+        proton_url = "https://services.swpc.noaa.gov/products/solar-wind/protons-5-minute.json"
 
-    sw_data = try_get_json(sw_url)
-    kp_data = try_get_json(kp_url)
+        sw_data = try_get_json(sw_url)
+        kp_data = try_get_json(kp_url)
+        plasma = try_get_json(dscovr_url)
+        protons = try_get_json(proton_url)
 
-    if isinstance(sw_data, list) and len(sw_data) > 0:
-        last = sw_data[-1]
-        vel = float(last.get("speed", 0))
-        dens = float(last.get("density", 0))
-        bt = float(last.get("bt", 0))
-    else:
-        vel, dens, bt = None, None, None
+        vel = dens = bt = temp = psi_s = kp = None
 
-    if isinstance(kp_data, list) and len(kp_data) > 1:
-        kp = float(kp_data[-1][1])
-    else:
-        kp = None
+        # Extract solar wind values if available
+        if isinstance(sw_data, list) and len(sw_data) > 0:
+            last = sw_data[-1]
+            vel = float(last.get("speed", 0))
+            dens = float(last.get("density", 0))
+            bt = float(last.get("bt", 0))
 
-    return {
-        "solar_speed": vel,
-        "solar_density": dens,
-        "bt": bt,
-        "kp": kp
-    }
+        # Extract plasma temperature from DSCOVR
+        if isinstance(plasma, list) and len(plasma) > 1:
+            # Last row has structure: time_tag, density, speed, temperature
+            vals = plasma[-1]
+            try:
+                if len(vals) >= 4:
+                    if not vel:
+                        vel = float(vals[2])
+                    if not dens:
+                        dens = float(vals[1])
+                    temp = float(vals[3])
+            except Exception:
+                pass
+
+        # Extract proton flux (used for solar pressure proxy)
+        if isinstance(protons, list) and len(protons) > 1:
+            last_flux = float(protons[-1][1]) if len(protons[-1]) > 1 else 0
+            psi_s = np.log10(last_flux + 1) / 3.0  # normalized proxy [0–1]
+
+        # Get geomagnetic Kp index
+        if isinstance(kp_data, list) and len(kp_data) > 1:
+            kp = float(kp_data[-1][1])
+
+        # Compute Solar Pressure Proxy if available
+        if all(v is not None for v in [vel, dens, temp]):
+            psi_s = np.clip(((vel / 800) * 0.5 + (dens / 10) * 0.3 + (temp / 2e5) * 0.2), 0, 1)
+
+        return {
+            "solar_speed": vel,
+            "solar_density": dens,
+            "bt": bt,
+            "temp": temp,
+            "psi_s": psi_s,
+            "kp": kp,
+            "status": "Live NOAA/DSCOVR Feed"
+        }
+
+    except Exception:
+        return {
+            "solar_speed": None,
+            "solar_density": None,
+            "bt": None,
+            "temp": None,
+            "psi_s": None,
+            "kp": None,
+            "status": "Offline"
+        }
 
 
 # ===============================================================
