@@ -1,5 +1,5 @@
 # ================================================================
-# 🌋 SUPT :: GROK Forecast Dashboard v7.0 (Production Build)
+# 🌞🐺 SunWolf's Forecast Dashboard v7.0 (Production Build)
 # ================================================================
 # Live Data: INGV 🇮🇹 | USGS 🌍 | EMSC 🇪🇺 | NOAA ☀️ | Synthetic 🧪
 # Full SUPT Tri-Coupled Monitoring Engine
