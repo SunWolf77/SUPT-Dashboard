@@ -164,7 +164,7 @@ def compute_eii(df, solar):
 # ================================================================
 # --- DASHBOARD BODY ---
 # ================================================================
-st.title("🌋 SUPT :: GROK Forecast Dashboard")
+st.title("🌞🐺 SunWolf's Forecast Dashboard")
 st.caption("v7.0 — Real-Time Solar–Geomagnetic–Seismic SUPT Engine")
 
 solar = fetch_noaa_solar()
