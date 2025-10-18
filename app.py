@@ -147,9 +147,10 @@ if not df.empty:
 else:
     st.info("No seismic data available.")
 
+# Auto-refresh every 10 minutes
+st_autorefresh(interval=600000, key="datarefresh")
+
 # --- Footer ---
 st.markdown("---")
 st.caption(f"Updated {dt.datetime.utcnow():%Y-%m-%d %H:%M:%S UTC} | Feeds: NOAA • USGS • DSCOVR | SUPT Final Build — Sheppard’s Universal Proxy Theory")
 
-# Auto-refresh every 10 minutes
-st_autorefresh(interval=600000, key="datarefresh")
