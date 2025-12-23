@@ -18,7 +18,7 @@ domain = st.selectbox("Domain", ['EQ', 'VOLC', 'SOL'])
 start_date = st.text_input("Start Date (YYYY-MM-DD)", datetime.now().strftime("%Y-%m-%d"))
 ionex_text = st.text_area("Paste IONEX Text (optional for LAIC)")
 
-# Historical matches (expand as needed)
+# Historical matches
 historical_matches = [
     [0.8, 6.9, 1, 'EQ', 3.0, 26.0],
     [0.7, 5.5, 2, 'EQ', 4.0, 20.0],
@@ -35,7 +35,6 @@ if st.button("Run Forecast"):
             start_date=start_date,
             ionex_text=ionex_text
         )
-
         fig, ax = plt.subplots()
         ax.plot(t, forecast, label='Forecast')
         ax.scatter(t[peaks], forecast[peaks], color='red', label='Peaks')
@@ -44,15 +43,8 @@ if st.button("Run Forecast"):
         ax.set_title('Sentinel Forecast')
         ax.legend()
         st.pyplot(fig)
-
-        if len(peaks) > 0:
-            peak_days = [f"{day:.1f}" for day in t[peaks]]
-            st.success(f"Detected {len(peaks)} resonant peaks at: {', '.join(peak_days)} days ahead")
-        else:
-            st.warning("No distinct peaks detected (try higher proxies/Schumann).")
-
-        st.info(f"Estimated Lyapunov (chaos): {lyap:.3f}")
-        st.info(f"Critical Triplet Alert: {'YES - potential imminent resonance!' if alert else 'No'}")
-
+        st.success(f"Peaks at days: {', '.join([f'{d:.1f}' for d in t[peaks]])}" if peaks.size > 0 else "No peaks detected")
+        st.info(f"Lyapunov: {lyap:.3f}")
+        st.info(f"Critical Triplet: {'YES' if alert else 'No'}")
     except Exception as e:
-        st.error(f"Run failed: {str(e)}")
+        st.error(f"Error: {str(e)}")
