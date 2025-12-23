@@ -5,5 +5,4 @@ scipy
 astropy
 requests
 matplotlib
-plotly
 streamlit-autorefresh
