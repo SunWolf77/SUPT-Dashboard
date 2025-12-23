@@ -1,5 +1,6 @@
 streamlit
 numpy
+scipy
 pandas
 folium
 streamlit-folium
@@ -7,3 +8,4 @@ requests
 opencv-python-headless
 pytesseract
 pillow
+astropy  # if you use tidal/alignment functions
