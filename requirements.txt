@@ -1,11 +1,9 @@
 streamlit
 numpy
-scipy
-astropy
-matplotlib
+pandas
+folium
+streamlit-folium
 requests
 opencv-python-headless
 pytesseract
 pillow
-folium
-streamlit-folium
