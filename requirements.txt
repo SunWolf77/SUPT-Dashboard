@@ -4,6 +4,8 @@ scipy
 astropy
 matplotlib
 requests
-pytesseract
 opencv-python-headless
+pytesseract
 pillow
+folium
+streamlit-folium
