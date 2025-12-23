@@ -4,6 +4,20 @@ from astropy.coordinates import get_body_barycentric
 from astropy.time import Time
 import astropy.units as u
 
+def resonance_fit(x, a, b):
+    return a * np.exp(b * x)
+
+def calibrate_resonance(matches, domain=None):
+    if domain:
+        filtered = [m for m in matches if m[3] == domain]
+    else:
+        filtered = matches
+    if len(filtered) < 2:
+        return 1.0, 0.0  # Default if not enough data
+    proxies, outcomes, _, _, _, _ = zip(*filtered)
+    popt, _ = curve_fit(resonance_fit, proxies, outcomes, p0=[1, 1])
+    return popt
+
 def duffing_oscillator(y, t, gamma, alpha, beta, tau, omega, folded_proxy):
     x, v = y
     dxdt = v
@@ -70,11 +84,14 @@ def sentinel_forecast(proxies, geomag_kp=0, schumann_power=20.0, historical_matc
     geomag_factor = geomag_kp / 9.0 if geomag_kp > 0 else 1.0
     schumann_factor = max(1.0, min(2.0, schumann_power / 20.0))
     signal *= (1 + geomag_factor + schumann_factor)
+    from data_fetch import get_goes_flux_factor, get_solar_wind_factor, get_geomag_storm_factor, get_solar_flare_factor
+    from utils import low_pass_filter, check_critical_triplet
     signal *= get_goes_flux_factor()
     signal *= get_solar_wind_factor()
     signal *= get_geomag_storm_factor()
     signal *= get_solar_flare_factor()
-    signal *= get_laic_tec_factor(ionex_text) if ionex_text else 1.0
+    laic_factor = get_laic_tec_factor(ionex_text) if ionex_text else 1.0
+    signal *= laic_factor
     anomaly_signal = low_pass_filter(signal)
     alert = check_critical_triplet(anomaly_signal)
     forecast = np.cumsum(signal) * folded_proxy * np.exp(0.01 * t)
